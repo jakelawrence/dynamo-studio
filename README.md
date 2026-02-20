@@ -1,36 +1,164 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# DynamoStudio
+
+DynamoStudio is a Next.js web app for exploring and managing AWS DynamoDB tables with an integrated AI assistant.
+
+It combines:
+- A table browser with schema and approximate table stats
+- Item-level CRUD (create, edit, delete)
+- Search and pagination for browsing records
+- An AI chat assistant (Mastra + Anthropic) for schema explanation, query/code generation, and optimization suggestions
+
+## What It Does
+
+- Lists DynamoDB tables in your AWS account/region
+- Displays table key schema (PK/SK) and GSIs
+- Loads table items with pagination
+- Lets you:
+  - Add new items
+  - Edit existing items
+  - Delete single or multiple items
+- Supports key-focused search (PK/SK-oriented search strategy)
+- Shows JSON value viewer for nested attributes
+- Includes an in-app AI assistant tied to the currently selected table context
+
+## Tech Stack
+
+- Next.js (App Router)
+- React + TypeScript
+- AWS SDK v3 (`@aws-sdk/client-dynamodb`, `@aws-sdk/lib-dynamodb`)
+- Mastra agent framework
+- Anthropic model via AI SDK
+
+## Prerequisites
+
+- Node.js 18+
+- AWS account credentials with DynamoDB access
+- Anthropic API key (required for the AI chat feature)
+
+## Environment Variables
+
+Create `.env.local` in the project root:
+
+```bash
+AWS_REGION=us-east-1
+AWS_ACCESS_KEY_ID=your_access_key_id
+AWS_SECRET_ACCESS_KEY=your_secret_access_key
+ANTHROPIC_API_KEY=your_anthropic_api_key
+```
+
+### Minimum AWS IAM Permissions
+
+The app/API use these DynamoDB operations:
+- `dynamodb:ListTables`
+- `dynamodb:DescribeTable`
+- `dynamodb:Scan`
+- `dynamodb:Query`
+- `dynamodb:PutItem`
+- `dynamodb:DeleteItem`
 
 ## Getting Started
 
-First, run the development server:
+1. Install dependencies:
+
+```bash
+npm install
+```
+
+2. Add `.env.local` with the variables above.
+
+3. Start the development server:
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+4. Open:
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+[http://localhost:3000](http://localhost:3000)
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Build and Run Production
 
-## Learn More
+```bash
+npm run build
+npm run start
+```
 
-To learn more about Next.js, take a look at the following resources:
+## Example Use Cases
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+1. Inspect a table quickly:
+- Select a table from the sidebar
+- Review PK/SK, GSIs, and approximate record count
+- Browse records page-by-page
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+2. Fix bad data in-place:
+- Search by key prefix/value
+- Open the row editor
+- Update attributes and save
 
-## Deploy on Vercel
+3. Clean test data:
+- Select multiple rows with checkboxes
+- Bulk delete test items
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+4. Plan improvements with AI:
+- Open `Ask AI`
+- Prompts like:
+  - “Explain this table’s schema and access patterns.”
+  - “Generate a TypeScript query for all orders by userId.”
+  - “What GSIs should I add for status + createdAt lookups?”
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## API Overview
+
+- `GET /api/tables` → list table names
+- `GET /api/tables/[name]` → table schema summary (PK/SK/GSI names)
+- `GET /api/tables/[name]/meta` → approximate `itemCount` and `sizeBytes`
+- `GET /api/tables/[name]/items` → paginated item fetch/search
+- `POST /api/tables/[name]/items` → create/update item
+- `DELETE /api/tables/[name]/items` → delete item by key
+- `GET /api/region` → current AWS region from env
+- `POST /api/agent` → stream AI chat responses with active table context
+
+## Project Structure
+
+```text
+app/
+  api/
+    agent/route.ts
+    region/route.ts
+    tables/
+      route.ts
+      [name]/
+        route.ts
+        items/route.ts
+        meta/route.ts
+  lib/dynamo.ts
+  page.tsx
+components/
+  AgentChat.tsx
+mastra/
+  agents/dynamoAgent.ts
+  tools/dynamoTools.ts
+```
+
+## Notes and Limitations
+
+- Table counts/sizes from `DescribeTable` are approximate and not real-time.
+- Search is key-focused and can fall back to scans depending on term/table shape.
+- AI chat requires `ANTHROPIC_API_KEY`; without it, the core table UI still works.
+- This project currently stores AWS credentials in env vars for local/dev convenience. For production, prefer IAM roles or a secure secrets manager.
+
+## Troubleshooting
+
+- “Failed to connect to DynamoDB”:
+  - Verify AWS credentials and region in `.env.local`
+  - Confirm IAM permissions listed above
+
+- AI chat not responding:
+  - Verify `ANTHROPIC_API_KEY`
+  - Check server logs for `/api/agent` errors
+
+- No tables found:
+  - Confirm region points to where your tables exist
+
+## License
+
+No license file is currently included. Add one (for example, MIT) before open-source distribution.
