@@ -9,11 +9,16 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@ai-sdk/anthropic": "^3.0.46",
+    "@ai-sdk/react": "^3.0.96",
     "@aws-sdk/client-dynamodb": "^3.994.0",
     "@aws-sdk/lib-dynamodb": "^3.994.0",
+    "@mastra/core": "^1.5.0",
+    "ai": "^6.0.94",
     "next": "16.1.6",
     "react": "19.2.3",
-    "react-dom": "19.2.3"
+    "react-dom": "19.2.3",
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",

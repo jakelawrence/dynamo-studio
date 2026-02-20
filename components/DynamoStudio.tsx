@@ -1,6 +1,6 @@
 "use client";
 import { useState, useEffect, CSSProperties } from "react";
-import AgentChat from "../components/AgentChat";
+import AgentChat from "./AgentChat";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 interface TableSchema {
@@ -1063,7 +1063,7 @@ const s: Record<string, CSSProperties> = {
     fontSize: 9,
     fontWeight: 700,
     letterSpacing: "0.5px",
-    background: "#001c0b",
+    background: "#2d1200",
     color: "#80FF00",
     padding: "1px 5px",
     borderRadius: 3,
