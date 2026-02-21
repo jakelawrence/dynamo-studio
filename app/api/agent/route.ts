@@ -25,7 +25,7 @@ export async function POST(req: NextRequest) {
         schema
           ? `Its schema (already loaded): PK=${schema.pk}, SK=${schema.sk ?? "none"}, GSIs=${schema.gsi.length > 0 ? schema.gsi.join(", ") : "none"}.`
           : ""
-      }\nIf they refer to "this table", "the current table", or similar, use "${activeTable}".`
+      }\nIf they refer to "this table", "the current table", or similar, use "${activeTable}".\nIf earlier conversation mentions a different table, treat that as stale unless the user explicitly asks for it now.`
     : "";
 
   // stream() returns MastraModelOutput. Convert it to AI SDK UI message stream

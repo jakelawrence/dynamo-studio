@@ -14,6 +14,41 @@ interface AgentChatProps {
   onClose: () => void;
 }
 
+type ExecInputType = "string" | "number" | "boolean";
+type ExecOperation = "Query" | "Scan" | "GetItem" | "PutItem" | "UpdateItem" | "DeleteItem";
+
+interface ExecInputSchema {
+  name: string;
+  type: ExecInputType;
+  required?: boolean;
+  description?: string;
+}
+
+interface ExecPayload {
+  type: "dynamo-exec";
+  operation: ExecOperation;
+  tableName?: string;
+  inputSchema?: ExecInputSchema[];
+  params: Record<string, unknown>;
+}
+
+interface ExecuteResponse {
+  operation: ExecOperation;
+  tableName: string;
+  rowCount: number;
+  rows: Record<string, unknown>[];
+  raw: Record<string, unknown>;
+}
+
+interface ExecutionState {
+  prompted: boolean;
+  isRunning: boolean;
+  expanded: boolean;
+  error: string | null;
+  result: ExecuteResponse | null;
+  inputValues: Record<string, string>;
+}
+
 // ─── Language options for quick-insert prompts ────────────────────────────
 const LANGUAGES = ["TypeScript", "JavaScript", "Python", "Go", "Java", "Rust"] as const;
 type Language = (typeof LANGUAGES)[number];
@@ -25,6 +60,293 @@ const STARTERS = [
   { label: "Generate a query", prompt: "Generate a TypeScript query to get all items by the partition key." },
   { label: "What indexes should I add?", prompt: "Based on common access patterns, what indexes should I consider adding to this table?" },
 ];
+
+function parseExecPayloads(content: string): ExecPayload[] {
+  const blockRe = /```([\w-]*)\n([\s\S]*?)```/g;
+  const payloads: ExecPayload[] = [];
+  let match: RegExpExecArray | null;
+
+  while ((match = blockRe.exec(content)) !== null) {
+    const lang = match[1].trim().toLowerCase();
+    const code = match[2].trim();
+    if (lang !== "dynamo-exec" && lang !== "dynamoexec" && lang !== "json") continue;
+
+    try {
+      const parsed = JSON.parse(code);
+      if (parsed && parsed.type === "dynamo-exec" && parsed.operation && parsed.params && typeof parsed.params === "object") {
+        payloads.push(parsed as ExecPayload);
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  return payloads;
+}
+
+function inferObjectLiteralBounds(source: string, startAt: number): { start: number; end: number } | null {
+  const start = source.indexOf("{", startAt);
+  if (start < 0) return null;
+
+  let depth = 0;
+  let inString: '"' | "'" | "`" | null = null;
+  let escaped = false;
+
+  for (let i = start; i < source.length; i += 1) {
+    const char = source[i];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (char === "\\") {
+        escaped = true;
+        continue;
+      }
+      if (char === inString) inString = null;
+      continue;
+    }
+
+    if (char === '"' || char === "'" || char === "`") {
+      inString = char;
+      continue;
+    }
+
+    if (char === "{") depth += 1;
+    if (char === "}") {
+      depth -= 1;
+      if (depth === 0) return { start, end: i + 1 };
+    }
+  }
+
+  return null;
+}
+
+function parseSimpleObjectEntries(objectLiteral: string): Array<{ key: string; value: string }> {
+  const body = objectLiteral.trim().replace(/^\{/, "").replace(/\}$/, "");
+  const entries: Array<{ key: string; value: string }> = [];
+  let current = "";
+  let depth = 0;
+  let inString: '"' | "'" | "`" | null = null;
+  let escaped = false;
+
+  const pushCurrent = () => {
+    const chunk = current.trim();
+    current = "";
+    if (!chunk) return;
+    let idx = -1;
+    let localDepth = 0;
+    let localInString: '"' | "'" | "`" | null = null;
+    let localEscaped = false;
+    for (let i = 0; i < chunk.length; i += 1) {
+      const ch = chunk[i];
+      if (localInString) {
+        if (localEscaped) {
+          localEscaped = false;
+          continue;
+        }
+        if (ch === "\\") {
+          localEscaped = true;
+          continue;
+        }
+        if (ch === localInString) localInString = null;
+        continue;
+      }
+      if (ch === '"' || ch === "'" || ch === "`") {
+        localInString = ch;
+        continue;
+      }
+      if (ch === "{" || ch === "[" || ch === "(") localDepth += 1;
+      if (ch === "}" || ch === "]" || ch === ")") localDepth -= 1;
+      if (ch === ":" && localDepth === 0) {
+        idx = i;
+        break;
+      }
+    }
+    if (idx < 0) return;
+    const key = chunk.slice(0, idx).trim().replace(/^["']|["']$/g, "");
+    const value = chunk.slice(idx + 1).trim();
+    if (!key) return;
+    entries.push({ key, value });
+  };
+
+  for (let i = 0; i < body.length; i += 1) {
+    const char = body[i];
+
+    if (inString) {
+      current += char;
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (char === "\\") {
+        escaped = true;
+        continue;
+      }
+      if (char === inString) inString = null;
+      continue;
+    }
+
+    if (char === '"' || char === "'" || char === "`") {
+      inString = char;
+      current += char;
+      continue;
+    }
+
+    if (char === "{" || char === "[" || char === "(") depth += 1;
+    if (char === "}" || char === "]" || char === ")") depth -= 1;
+
+    if (char === "," && depth === 0) {
+      pushCurrent();
+      continue;
+    }
+
+    current += char;
+  }
+
+  pushCurrent();
+  return entries;
+}
+
+function parseExpressionAttributeNames(value: string): Record<string, string> | null {
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) return null;
+  const entries = parseSimpleObjectEntries(trimmed);
+  const result: Record<string, string> = {};
+  for (const entry of entries) {
+    const match = entry.value.match(/^["']([\s\S]*)["']$/);
+    if (!match) continue;
+    result[entry.key] = match[1];
+  }
+  return Object.keys(result).length > 0 ? result : null;
+}
+
+function parseExpressionAttributeValues(
+  value: string,
+): { values: Record<string, unknown> | null; inputs: ExecInputSchema[] } {
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) return { values: null, inputs: [] };
+  const entries = parseSimpleObjectEntries(trimmed);
+  const result: Record<string, unknown> = {};
+  const inputs: ExecInputSchema[] = [];
+
+  for (const entry of entries) {
+    const raw = entry.value.trim();
+    if (/^["'][\s\S]*["']$/.test(raw)) {
+      result[entry.key] = raw.slice(1, -1);
+      continue;
+    }
+    if (/^-?\d+(\.\d+)?$/.test(raw)) {
+      result[entry.key] = Number(raw);
+      continue;
+    }
+    if (raw === "true" || raw === "false") {
+      result[entry.key] = raw === "true";
+      continue;
+    }
+
+    const inputName = raw.replace(/[^a-zA-Z0-9_]/g, "") || entry.key.replace(/[^a-zA-Z0-9_]/g, "");
+    result[entry.key] = `{{${inputName}}}`;
+    inputs.push({
+      name: inputName,
+      type: "string",
+      required: true,
+      description: `Value for ${entry.key}`,
+    });
+  }
+
+  return { values: Object.keys(result).length > 0 ? result : null, inputs };
+}
+
+function inferExecPayloadsFromCode(content: string, activeTable: string): ExecPayload[] {
+  const payloads: ExecPayload[] = [];
+  const commandRe = /new\s+(ScanCommand|QueryCommand|GetCommand|PutCommand|UpdateCommand|DeleteCommand)\s*\(/g;
+  let match: RegExpExecArray | null;
+
+  while ((match = commandRe.exec(content)) !== null) {
+    const commandName = match[1];
+    const bounds = inferObjectLiteralBounds(content, match.index);
+    if (!bounds) continue;
+
+    const objectLiteral = content.slice(bounds.start, bounds.end);
+    const topLevel = parseSimpleObjectEntries(objectLiteral);
+    const params: Record<string, unknown> = {};
+    const inputSchema: ExecInputSchema[] = [];
+
+    for (const entry of topLevel) {
+      if (entry.key === "TableName") {
+        const tableMatch = entry.value.match(/^["']([\s\S]*)["']$/);
+        if (tableMatch) params.TableName = tableMatch[1];
+        continue;
+      }
+
+      if (entry.key === "ExpressionAttributeNames") {
+        const names = parseExpressionAttributeNames(entry.value);
+        if (names) params.ExpressionAttributeNames = names;
+        continue;
+      }
+
+      if (entry.key === "ExpressionAttributeValues") {
+        const parsed = parseExpressionAttributeValues(entry.value);
+        if (parsed.values) params.ExpressionAttributeValues = parsed.values;
+        if (parsed.inputs.length > 0) inputSchema.push(...parsed.inputs);
+        continue;
+      }
+
+      const stringMatch = entry.value.match(/^["']([\s\S]*)["']$/);
+      if (stringMatch) {
+        params[entry.key] = stringMatch[1];
+        continue;
+      }
+
+      if (/^-?\d+(\.\d+)?$/.test(entry.value)) {
+        params[entry.key] = Number(entry.value);
+        continue;
+      }
+
+      if (entry.value === "true" || entry.value === "false") {
+        params[entry.key] = entry.value === "true";
+      }
+    }
+
+    const operationMap: Record<string, ExecOperation> = {
+      QueryCommand: "Query",
+      ScanCommand: "Scan",
+      GetCommand: "GetItem",
+      PutCommand: "PutItem",
+      UpdateCommand: "UpdateItem",
+      DeleteCommand: "DeleteItem",
+    };
+
+    const operation = operationMap[commandName];
+    if (!operation) continue;
+
+    payloads.push({
+      type: "dynamo-exec",
+      operation,
+      tableName: typeof params.TableName === "string" ? params.TableName : activeTable,
+      inputSchema: inputSchema.length > 0 ? inputSchema : undefined,
+      params,
+    });
+  }
+
+  return payloads;
+}
+
+function stripExecBlocks(content: string): string {
+  return content.replace(/```([\w-]*)\n([\s\S]*?)```/g, (full, lang: string, code: string) => {
+    const normalized = String(lang).trim().toLowerCase();
+    if (normalized === "dynamo-exec" || normalized === "dynamoexec") return "";
+    if (normalized !== "json") return full;
+    try {
+      const parsed = JSON.parse(code.trim());
+      return parsed?.type === "dynamo-exec" ? "" : full;
+    } catch {
+      return full;
+    }
+  });
+}
 
 // ─── Markdown-like renderer ───────────────────────────────────────────────
 // Renders assistant messages with syntax-highlighted code blocks and basic
@@ -85,6 +407,7 @@ export default function AgentChat({ activeTable, schema, onClose }: AgentChatPro
   const [selectedLang, setSelectedLang] = useState<Language>("TypeScript");
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [input, setInput] = useState("");
+  const [execStates, setExecStates] = useState<Record<string, ExecutionState>>({});
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -107,6 +430,91 @@ export default function AgentChat({ activeTable, schema, onClose }: AgentChatPro
       .filter((part) => part.type === "text")
       .map((part) => part.text)
       .join("\n");
+
+  const ensureExecState = (key: string): ExecutionState =>
+    execStates[key] ?? {
+      prompted: false,
+      isRunning: false,
+      expanded: false,
+      error: null,
+      result: null,
+      inputValues: {},
+    };
+
+  const updateExecState = (key: string, updater: (prev: ExecutionState) => ExecutionState) => {
+    setExecStates((prev) => {
+      const current = prev[key] ?? {
+        prompted: false,
+        isRunning: false,
+        expanded: false,
+        error: null,
+        result: null,
+        inputValues: {},
+      };
+      return { ...prev, [key]: updater(current) };
+    });
+  };
+
+  const setExecInputValue = (key: string, inputName: string, value: string) => {
+    updateExecState(key, (prev) => ({
+      ...prev,
+      prompted: true,
+      inputValues: { ...prev.inputValues, [inputName]: value },
+    }));
+  };
+
+  const hasMissingRequiredInputs = (payload: ExecPayload, state: ExecutionState): boolean =>
+    (payload.inputSchema ?? []).some((field) => field.required && !(state.inputValues[field.name] ?? "").toString().trim());
+
+  const executePayload = async (stateKey: string, payload: ExecPayload) => {
+    const current = ensureExecState(stateKey);
+    if (hasMissingRequiredInputs(payload, current)) {
+      updateExecState(stateKey, (prev) => ({
+        ...prev,
+        prompted: true,
+        error: "Fill in all required inputs before running.",
+      }));
+      return;
+    }
+
+    updateExecState(stateKey, (prev) => ({
+      ...prev,
+      prompted: true,
+      isRunning: true,
+      error: null,
+    }));
+
+    try {
+      const res = await fetch("/api/agent/execute", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          activeTable,
+          payload,
+          inputs: ensureExecState(stateKey).inputValues,
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data?.error || "Execution failed");
+      }
+
+      updateExecState(stateKey, (prev) => ({
+        ...prev,
+        isRunning: false,
+        error: null,
+        expanded: true,
+        result: data as ExecuteResponse,
+      }));
+    } catch (error) {
+      updateExecState(stateKey, (prev) => ({
+        ...prev,
+        isRunning: false,
+        error: error instanceof Error ? error.message : "Execution failed",
+      }));
+    }
+  };
 
   // Auto-scroll to bottom on new messages
   useEffect(() => {
@@ -219,18 +627,103 @@ export default function AgentChat({ activeTable, schema, onClose }: AgentChatPro
             </div>
           </div>
         ) : (
-          messages.map((msg) => (
-            <div key={msg.id} style={{ ...cs.message, ...(msg.role === "user" ? cs.messageUser : cs.messageAssistant) }}>
-              <div style={{ ...cs.avatar, ...(msg.role === "user" ? cs.avatarUser : cs.avatarAssistant) }}>{msg.role === "user" ? "U" : "AI"}</div>
-              <div style={cs.messageBody}>
-                {msg.role === "assistant" ? (
-                  <MessageContent content={extractTextContent(msg)} />
-                ) : (
-                  <span style={{ fontSize: 13, lineHeight: 1.65 }}>{extractTextContent(msg)}</span>
-                )}
+          messages.map((msg) => {
+            const rawContent = extractTextContent(msg);
+            const structuredExecPayloads = msg.role === "assistant" ? parseExecPayloads(rawContent) : [];
+            const execPayloads =
+              msg.role === "assistant" && structuredExecPayloads.length === 0
+                ? inferExecPayloadsFromCode(rawContent, activeTable)
+                : structuredExecPayloads;
+            const displayContent = msg.role === "assistant" ? stripExecBlocks(rawContent) : rawContent;
+
+            return (
+              <div key={msg.id} style={{ ...cs.message, ...(msg.role === "user" ? cs.messageUser : cs.messageAssistant) }}>
+                <div style={{ ...cs.avatar, ...(msg.role === "user" ? cs.avatarUser : cs.avatarAssistant) }}>{msg.role === "user" ? "U" : "AI"}</div>
+                <div style={cs.messageBody}>
+                  {msg.role === "assistant" ? (
+                    <>
+                      <MessageContent content={displayContent} />
+                      {execPayloads.map((payload, index) => {
+                        const stateKey = `${msg.id}:${index}`;
+                        const state = ensureExecState(stateKey);
+                        const requiredMissing = hasMissingRequiredInputs(payload, state);
+                        const inputSchema = payload.inputSchema ?? [];
+                        const showInputs = inputSchema.length > 0 && (state.prompted || Boolean(state.result));
+
+                        return (
+                          <div key={stateKey} style={cs.execCard}>
+                            <div style={cs.execMetaRow}>
+                              <span style={cs.execTag}>{payload.operation}</span>
+                              <span style={cs.execTable}>Table: {payload.tableName || activeTable || "current table"}</span>
+                            </div>
+
+                            {showInputs && (
+                              <div style={cs.execInputs}>
+                                {inputSchema.map((field) => (
+                                  <label key={field.name} style={cs.execInputLabel}>
+                                    <span>
+                                      {field.name} ({field.type}){field.required ? " *" : ""}
+                                    </span>
+                                    <input
+                                      style={cs.execInput}
+                                      value={state.inputValues[field.name] ?? ""}
+                                      onChange={(e) => setExecInputValue(stateKey, field.name, e.target.value)}
+                                      placeholder={field.description || `Enter ${field.name}`}
+                                    />
+                                  </label>
+                                ))}
+                              </div>
+                            )}
+
+                            <div style={cs.execActionRow}>
+                              <button
+                                style={{ ...cs.execBtn, ...(state.isRunning ? cs.execBtnDisabled : {}) }}
+                                onClick={() => {
+                                  if (inputSchema.length > 0 && !state.prompted) {
+                                    updateExecState(stateKey, (prev) => ({ ...prev, prompted: true, error: null }));
+                                    return;
+                                  }
+                                  executePayload(stateKey, payload);
+                                }}
+                                disabled={state.isRunning}
+                              >
+                                {state.isRunning ? "Running..." : requiredMissing ? "Enter inputs to run" : "Run query"}
+                              </button>
+
+                              {state.result && (
+                                <button
+                                  style={cs.execToggle}
+                                  onClick={() => updateExecState(stateKey, (prev) => ({ ...prev, expanded: !prev.expanded }))}
+                                >
+                                  {state.expanded ? "Hide rows" : `Show rows (${state.result.rowCount})`}
+                                </button>
+                              )}
+                            </div>
+
+                            {state.error && <div style={cs.execError}>{state.error}</div>}
+
+                            {state.result && (
+                              <div style={cs.execSummary}>
+                                Returned {state.result.rowCount} row{state.result.rowCount === 1 ? "" : "s"} from {state.result.tableName}.
+                              </div>
+                            )}
+
+                            {state.result && state.expanded && (
+                              <pre style={cs.execRows}>
+                                <code>{JSON.stringify(state.result.rows, null, 2)}</code>
+                              </pre>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </>
+                  ) : (
+                    <span style={{ fontSize: 13, lineHeight: 1.65 }}>{displayContent}</span>
+                  )}
+                </div>
               </div>
-            </div>
-          ))
+            );
+          })
         )}
         {isLoading && (
           <div style={{ ...cs.message, ...cs.messageAssistant }}>
@@ -636,5 +1129,118 @@ const cs: Record<string, CSSProperties> = {
     paddingLeft: 4,
     paddingRight: 4,
     fontFamily: "'JetBrains Mono', monospace",
+  },
+  execCard: {
+    marginTop: 8,
+    borderWidth: 1,
+    borderStyle: "solid",
+    borderColor: "#1b2c14",
+    borderRadius: 8,
+    background: "#0a1208",
+    padding: "10px 10px 9px",
+  },
+  execMetaRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    marginBottom: 8,
+  },
+  execTag: {
+    fontSize: 10,
+    color: "#80FF00",
+    borderWidth: 1,
+    borderStyle: "solid",
+    borderColor: "#264d12",
+    borderRadius: 10,
+    padding: "2px 7px",
+    background: "#0b1a06",
+    fontWeight: 700,
+  },
+  execTable: {
+    fontSize: 10,
+    color: "#6b8a5f",
+  },
+  execInputs: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 7,
+    marginBottom: 8,
+  },
+  execInputLabel: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 4,
+    fontSize: 10,
+    color: "#8da08a",
+  },
+  execInput: {
+    background: "#0f1a0c",
+    borderWidth: 1,
+    borderStyle: "solid",
+    borderColor: "#24381c",
+    borderRadius: 6,
+    color: "#d8e4d1",
+    fontSize: 11,
+    padding: "6px 8px",
+    outline: "none",
+    fontFamily: "inherit",
+  },
+  execActionRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    flexWrap: "wrap",
+  },
+  execBtn: {
+    background: "#80FF00",
+    color: "#051002",
+    border: "none",
+    borderRadius: 6,
+    padding: "6px 10px",
+    fontSize: 11,
+    fontWeight: 700,
+    cursor: "pointer",
+    fontFamily: "inherit",
+  },
+  execBtnDisabled: {
+    opacity: 0.6,
+    cursor: "wait",
+  },
+  execToggle: {
+    background: "transparent",
+    color: "#80FF00",
+    borderWidth: 1,
+    borderStyle: "solid",
+    borderColor: "#23401a",
+    borderRadius: 6,
+    padding: "5px 9px",
+    fontSize: 10,
+    cursor: "pointer",
+    fontFamily: "inherit",
+  },
+  execError: {
+    marginTop: 8,
+    color: "#f87171",
+    fontSize: 11,
+  },
+  execSummary: {
+    marginTop: 8,
+    fontSize: 11,
+    color: "#9bcf84",
+  },
+  execRows: {
+    marginTop: 8,
+    background: "#050805",
+    borderWidth: 1,
+    borderStyle: "solid",
+    borderColor: "#192b14",
+    borderRadius: 6,
+    padding: "9px",
+    maxHeight: 230,
+    overflow: "auto",
+    fontSize: 10,
+    lineHeight: 1.5,
+    color: "#cfe5bf",
+    whiteSpace: "pre",
   },
 };

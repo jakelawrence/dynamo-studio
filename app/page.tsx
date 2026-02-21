@@ -870,7 +870,7 @@ export default function DynamoStudio() {
       )}
 
       {/* ── AI Agent Chat ── */}
-      {agentOpen && <AgentChat activeTable={activeTable} schema={schema} onClose={() => setAgentOpen(false)} />}
+      {agentOpen && <AgentChat key={activeTable || "no-table"} activeTable={activeTable} schema={schema} onClose={() => setAgentOpen(false)} />}
 
       <style>{`
         * { box-sizing: border-box; margin: 0; padding: 0; }

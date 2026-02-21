@@ -51,7 +51,6 @@ export const getTableSchema = createTool({
     inferredAttributes: z.array(z.object({ name: z.string(), inferredType: z.string() })),
   }),
   execute: async ({ tableName }) => {
-
     const { Table } = await dynamo.send(new DescribeTableCommand({ TableName: tableName }));
 
     if (!Table) throw new Error(`Table ${tableName} not found`);
