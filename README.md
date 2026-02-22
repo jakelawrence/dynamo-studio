@@ -6,20 +6,66 @@ It combines:
 - A table browser with schema and approximate table stats
 - Item-level CRUD (create, edit, delete)
 - Search and pagination for browsing records
-- An AI chat assistant (Mastra + Anthropic) for schema explanation, query/code generation, and optimization suggestions
+- A visual table relationship workspace (Table Visualizer)
+- An AI chat assistant (Mastra + Anthropic) that can now run DynamoDB queries directly from chat
+- Local persistence of key UI/chat state via `localStorage`
 
-## What It Does
+## Highlights
 
-- Lists DynamoDB tables in your AWS account/region
-- Displays table key schema (PK/SK) and GSIs
-- Loads table items with pagination
-- Lets you:
-  - Add new items
-  - Edit existing items
-  - Delete single or multiple items
-- Supports key-focused search (PK/SK-oriented search strategy)
-- Shows JSON value viewer for nested attributes
-- Includes an in-app AI assistant tied to the currently selected table context
+### 1. AI Chat with Run Query
+
+The AI assistant can return runnable operation payloads (Query/Scan/GetItem/PutItem/UpdateItem/DeleteItem) and lets you execute them directly in-chat.
+
+- Detects runnable payloads in AI responses
+- Prompts for missing runtime inputs when needed
+- Executes via backend API and shows result rows inline
+- Supports both table-context chat and visualizer-context chat threads
+
+### 2. Table Visualizer
+
+The visualizer provides a schema map workflow for multi-table design analysis.
+
+- Drag/reposition table cards
+- Create and edit links between table fields
+- Hide/show tables to simplify the graph
+- Ask AI questions from the visualizer snapshot
+- Open a dedicated Visualizer Chat and resume visualizer chat history
+
+### 3. Local Storage Persistence
+
+DynamoStudio persists user state to improve continuity across reloads/restarts.
+
+- Main table view state:
+  - `activeTable`
+  - `pageSize`
+  - `sortCol` / `sortDir`
+  - `activeSearch`
+- Table Visualizer state:
+  - card positions
+  - field links
+  - hidden tables
+- AI Chat history:
+  - per-table chat threads
+  - visualizer chat threads
+  - migration support for legacy visualizer history key
+
+## Screenshot Placeholders
+
+### Main Table Browser
+
+![Main Table Browser Screenshot Placeholder](docs/screenshots/main-table-browser.png)
+
+### AI Chat (Run Query)
+
+![AI Chat Run Query Screenshot Placeholder](docs/screenshots/ai-chat-run-query.png)
+
+### Table Visualizer
+
+![Table Visualizer Screenshot Placeholder](docs/screenshots/table-visualizer.png)
+
+### Visualizer Chat + Thread History
+
+![Visualizer Chat History Screenshot Placeholder](docs/screenshots/visualizer-chat-history.png)
 
 ## Tech Stack
 
@@ -33,7 +79,7 @@ It combines:
 
 - Node.js 18+
 - AWS account credentials with DynamoDB access
-- Anthropic API key (required for the AI chat feature)
+- Anthropic API key (required for AI chat features)
 
 ## Environment Variables
 
@@ -72,9 +118,7 @@ npm install
 npm run dev
 ```
 
-4. Open:
-
-[http://localhost:3000](http://localhost:3000)
+4. Open [http://localhost:3000](http://localhost:3000)
 
 ## Build and Run Production
 
@@ -85,26 +129,29 @@ npm run start
 
 ## Example Use Cases
 
-1. Inspect a table quickly:
+1. Inspect a table quickly
 - Select a table from the sidebar
 - Review PK/SK, GSIs, and approximate record count
 - Browse records page-by-page
 
-2. Fix bad data in-place:
+2. Fix bad data in-place
 - Search by key prefix/value
 - Open the row editor
 - Update attributes and save
 
-3. Clean test data:
+3. Clean test data
 - Select multiple rows with checkboxes
 - Bulk delete test items
 
-4. Plan improvements with AI:
+4. Analyze architecture with the visualizer
+- Open `Visualizer`
+- Connect table fields and hide noisy tables
+- Ask AI for missing access patterns and GSI recommendations
+
+5. Execute AI-generated operations
 - Open `Ask AI`
-- Prompts like:
-  - “Explain this table’s schema and access patterns.”
-  - “Generate a TypeScript query for all orders by userId.”
-  - “What GSIs should I add for status + createdAt lookups?”
+- Request a query/scan for your use case
+- Run directly from the result card and inspect returned rows
 
 ## API Overview
 
@@ -115,17 +162,22 @@ npm run start
 - `POST /api/tables/[name]/items` → create/update item
 - `DELETE /api/tables/[name]/items` → delete item by key
 - `GET /api/region` → current AWS region from env
-- `POST /api/agent` → stream AI chat responses with active table context
+- `POST /api/agent` → stream AI chat responses
+- `POST /api/agent/execute` → execute AI-generated DynamoDB operation payloads
+- `GET /api/tables/visualizer` → table/field metadata for visualizer
 
 ## Project Structure
 
 ```text
 app/
   api/
-    agent/route.ts
+    agent/
+      route.ts
+      execute/route.ts
     region/route.ts
     tables/
       route.ts
+      visualizer/route.ts
       [name]/
         route.ts
         items/route.ts
@@ -134,6 +186,8 @@ app/
   page.tsx
 components/
   AgentChat.tsx
+  TableVisualizer.tsx
+  DynamoStudio.tsx
 mastra/
   agents/dynamoAgent.ts
   tools/dynamoTools.ts
@@ -142,8 +196,8 @@ mastra/
 ## Notes and Limitations
 
 - Table counts/sizes from `DescribeTable` are approximate and not real-time.
-- Search is key-focused and can fall back to scans depending on term/table shape.
-- AI chat requires `ANTHROPIC_API_KEY`; without it, the core table UI still works.
+- Search can fall back to scans depending on table shape and query term.
+- AI features require `ANTHROPIC_API_KEY`; without it, the core table UI still works.
 - This project currently stores AWS credentials in env vars for local/dev convenience. For production, prefer IAM roles or a secure secrets manager.
 
 ## Troubleshooting
@@ -155,6 +209,10 @@ mastra/
 - AI chat not responding:
   - Verify `ANTHROPIC_API_KEY`
   - Check server logs for `/api/agent` errors
+
+- AI Run Query fails:
+  - Confirm operation permissions for the active credentials
+  - Validate runtime input fields in the execution card
 
 - No tables found:
   - Confirm region points to where your tables exist
