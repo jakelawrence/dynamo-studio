@@ -1,5 +1,5 @@
 "use client";
-import { useState, useEffect, CSSProperties } from "react";
+import { useState, useEffect, useRef, CSSProperties } from "react";
 import {
   Bot,
   Check,
@@ -59,6 +59,45 @@ interface FetchItemsResult {
   items: DynamoItem[];
   lastKey: DynamoKey | null;
 }
+
+interface PersistedUiState {
+  activeTable: string;
+  pageSize: number;
+  sortCol: string | null;
+  sortDir: SortDir;
+  activeSearch: string;
+}
+
+const PAGE_SIZE_OPTIONS = [10, 25, 50, 100] as const;
+const DEFAULT_PAGE_SIZE = 25;
+const UI_STATE_STORAGE_KEY = "dynamoStudio.uiState.v1";
+
+const readPersistedUiState = (): PersistedUiState => {
+  const defaults: PersistedUiState = {
+    activeTable: "",
+    pageSize: DEFAULT_PAGE_SIZE,
+    sortCol: null,
+    sortDir: "asc",
+    activeSearch: "",
+  };
+  if (typeof window === "undefined") return defaults;
+  try {
+    const raw = window.localStorage.getItem(UI_STATE_STORAGE_KEY);
+    if (!raw) return defaults;
+    const parsed = JSON.parse(raw) as Partial<PersistedUiState>;
+    const pageSize = typeof parsed.pageSize === "number" && PAGE_SIZE_OPTIONS.includes(parsed.pageSize as (typeof PAGE_SIZE_OPTIONS)[number]) ? parsed.pageSize : defaults.pageSize;
+    const sortDir = parsed.sortDir === "desc" ? "desc" : "asc";
+    return {
+      activeTable: typeof parsed.activeTable === "string" ? parsed.activeTable : defaults.activeTable,
+      pageSize,
+      sortCol: typeof parsed.sortCol === "string" ? parsed.sortCol : null,
+      sortDir,
+      activeSearch: typeof parsed.activeSearch === "string" ? parsed.activeSearch : defaults.activeSearch,
+    };
+  } catch {
+    return defaults;
+  }
+};
 
 // ─── API Helpers ───────────────────────────────────────────────────────────
 
@@ -171,6 +210,15 @@ const formatBytes = (bytes: number): string => {
 
 // ─── Main Component ────────────────────────────────────────────────────────
 export default function DynamoStudio() {
+  const persistedUiState = useRef<PersistedUiState>({
+    activeTable: "",
+    pageSize: DEFAULT_PAGE_SIZE,
+    sortCol: null,
+    sortDir: "asc",
+    activeSearch: "",
+  });
+  const hasLoadedPersistedUiState = useRef(false);
+
   // Data state for the currently selected table and its rows.
   const [tables, setTables] = useState<string[]>([]);
   const [activeTable, setActiveTable] = useState<string>("");
@@ -197,12 +245,12 @@ export default function DynamoStudio() {
   const [sortDir, setSortDir] = useState<SortDir>("asc");
   const [awsRegion, setAwsRegion] = useState<string>("");
   const [agentOpen, setAgentOpen] = useState<boolean>(false);
+  const [agentSessionNonce, setAgentSessionNonce] = useState<number>(0);
   const [visualizerOpen, setVisualizerOpen] = useState<boolean>(false);
   const [queuedAgentPrompt, setQueuedAgentPrompt] = useState<{ id: string; text: string } | null>(null);
 
   // ── Pagination ────────────────────────────────────────────────────────────
-  const PAGE_SIZE_OPTIONS = [10, 25, 50, 100] as const;
-  const [pageSize, setPageSize] = useState<number>(25);
+  const [pageSize, setPageSize] = useState<number>(DEFAULT_PAGE_SIZE);
   const [currentPage, setCurrentPage] = useState<number>(1);
   const [cursorStack, setCursorStack] = useState<(DynamoKey | null)[]>([null]);
   const [lastKey, setLastKey] = useState<DynamoKey | null>(null);
@@ -220,16 +268,59 @@ export default function DynamoStudio() {
   const askAgentFromVisualizer = (prompt: string): void => {
     setVisualizerOpen(false);
     setAgentOpen(true);
+    setAgentSessionNonce((previous) => previous + 1);
     setQueuedAgentPrompt({ id: `visualizer-${Date.now()}`, text: prompt });
+  };
+
+  const openVisualizerChatWithHistory = (): void => {
+    setVisualizerOpen(false);
+    setAgentOpen(true);
+    setAgentSessionNonce((previous) => previous + 1);
+    setQueuedAgentPrompt({ id: `visualizer-open-${Date.now()}`, text: "" });
+  };
+
+  const openAgentFromButton = (): void => {
+    setQueuedAgentPrompt(null);
+    setAgentSessionNonce((previous) => previous + 1);
+    setAgentOpen(true);
+  };
+
+  const closeAgent = (): void => {
+    setAgentOpen(false);
+    setQueuedAgentPrompt(null);
   };
 
   // ── On mount: load tables + region ───────────────────────────────────────
   useEffect(() => {
     const init = async (): Promise<void> => {
+      const restoredUiState = readPersistedUiState();
+      persistedUiState.current = restoredUiState;
+      setPageSize(restoredUiState.pageSize);
+      setSortCol(restoredUiState.sortCol);
+      setSortDir(restoredUiState.sortDir);
+      setSearchInput(restoredUiState.activeSearch);
+      setActiveSearch(restoredUiState.activeSearch);
+      hasLoadedPersistedUiState.current = true;
+
       try {
         const tableList = await fetchTables();
         setTables(tableList);
-        if (tableList.length > 0) await switchTable(tableList[0]);
+        if (tableList.length > 0) {
+          const preferredTable = restoredUiState.activeTable;
+          const initialTable = preferredTable && tableList.includes(preferredTable) ? preferredTable : tableList[0];
+          const restorePersistedView = initialTable === preferredTable;
+          if (!restorePersistedView) {
+            setSortCol(null);
+            setSortDir("asc");
+            setSearchInput("");
+            setActiveSearch("");
+          }
+          await switchTable(initialTable, {
+            restorePersistedView,
+            pageSizeOverride: restoredUiState.pageSize,
+            restoredSearchTerm: restoredUiState.activeSearch,
+          });
+        }
       } catch (error) {
         showToast("Failed to connect to DynamoDB", "error");
         console.error(error);
@@ -247,14 +338,38 @@ export default function DynamoStudio() {
       .catch(() => {});
   }, []);
 
+  useEffect(() => {
+    if (!hasLoadedPersistedUiState.current) return;
+    if (typeof window === "undefined") return;
+    const stateToPersist: PersistedUiState = {
+      activeTable,
+      pageSize,
+      sortCol,
+      sortDir,
+      activeSearch,
+    };
+    window.localStorage.setItem(UI_STATE_STORAGE_KEY, JSON.stringify(stateToPersist));
+  }, [activeTable, pageSize, sortCol, sortDir, activeSearch]);
+
   // ── Switch table ──────────────────────────────────────────────────────────
-  const switchTable = async (tableName: string): Promise<void> => {
+  const switchTable = async (
+    tableName: string,
+    options: { restorePersistedView?: boolean; pageSizeOverride?: number; restoredSearchTerm?: string } = {},
+  ): Promise<void> => {
+    const { restorePersistedView = false, pageSizeOverride, restoredSearchTerm: restoredSearchTermOverride } = options;
+    const effectivePageSize = pageSizeOverride ?? pageSize;
+    const restoredSearchTerm = restorePersistedView
+      ? (restoredSearchTermOverride ?? persistedUiState.current.activeSearch).trim()
+      : "";
     setLoading(true);
     setActiveTable(tableName);
-    setSearchInput("");
-    setActiveSearch("");
+    setSearchInput(restoredSearchTerm);
+    setActiveSearch(restoredSearchTerm);
     setSelectedRows(new Set());
-    setSortCol(null);
+    if (!restorePersistedView) {
+      setSortCol(null);
+      setSortDir("asc");
+    }
     setCurrentPage(1);
     setCursorStack([null]);
     setLastKey(null);
@@ -262,7 +377,7 @@ export default function DynamoStudio() {
     try {
       const [schemaData, itemsResult, metadata] = await Promise.all([
         fetchSchema(tableName),
-        fetchItems(tableName, null, pageSize),
+        fetchItems(tableName, null, effectivePageSize, restoredSearchTerm || undefined),
         fetchTableMeta(tableName),
       ]);
       setSchema(schemaData);
@@ -577,7 +692,7 @@ export default function DynamoStudio() {
             </button>
             <button
               style={{ ...styles.btnSecondary, ...(agentOpen ? styles.btnAgentActive : {}) }}
-              onClick={() => setAgentOpen((isCurrentlyOpen) => !isCurrentlyOpen)}
+              onClick={openAgentFromButton}
               title="Open AI Assistant"
             >
               <Bot size={14} />
@@ -878,17 +993,19 @@ export default function DynamoStudio() {
       )}
 
       {/* ── AI Agent Chat ── */}
-      {visualizerOpen && <TableVisualizer onClose={() => setVisualizerOpen(false)} onAskAI={askAgentFromVisualizer} />}
+      {visualizerOpen && (
+        <TableVisualizer onClose={() => setVisualizerOpen(false)} onAskAI={askAgentFromVisualizer} onOpenVisualizerChat={openVisualizerChatWithHistory} />
+      )}
 
       {/* ── AI Agent Chat ── */}
       {agentOpen && (
         <AgentChat
-          key={activeTable || "no-table"}
+          key={`${activeTable || "no-table"}:${agentSessionNonce}`}
           activeTable={activeTable}
           schema={schema}
           queuedPrompt={queuedAgentPrompt}
           onQueuedPromptHandled={() => setQueuedAgentPrompt(null)}
-          onClose={() => setAgentOpen(false)}
+          onClose={closeAgent}
         />
       )}
 

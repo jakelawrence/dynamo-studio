@@ -33,6 +33,7 @@ interface VisualizerRelation {
 interface TableVisualizerProps {
   onClose: () => void;
   onAskAI: (prompt: string) => void;
+  onOpenVisualizerChat: () => void;
 }
 
 interface TablePosition {
@@ -40,9 +41,66 @@ interface TablePosition {
   y: number;
 }
 
+interface PersistedVisualizerState {
+  positions: Record<string, TablePosition>;
+  relations: VisualizerRelation[];
+  hidden: string[];
+}
+
 const CARD_WIDTH = 280;
 const CARD_GAP = 28;
 type AnchorSide = "top" | "right" | "bottom" | "left";
+const VISUALIZER_STORAGE_KEY = "dynamoStudio.tableVisualizer.v1";
+
+const readPersistedVisualizerState = (): PersistedVisualizerState => {
+  const defaults: PersistedVisualizerState = {
+    positions: {},
+    relations: [],
+    hidden: [],
+  };
+  if (typeof window === "undefined") return defaults;
+
+  try {
+    const raw = window.localStorage.getItem(VISUALIZER_STORAGE_KEY);
+    if (!raw) return defaults;
+    const parsed = JSON.parse(raw) as Partial<PersistedVisualizerState>;
+
+    const positions =
+      parsed.positions && typeof parsed.positions === "object"
+        ? Object.entries(parsed.positions).reduce<Record<string, TablePosition>>((acc, [tableName, pos]) => {
+            if (
+              typeof tableName === "string" &&
+              pos &&
+              typeof pos === "object" &&
+              typeof (pos as TablePosition).x === "number" &&
+              typeof (pos as TablePosition).y === "number"
+            ) {
+              acc[tableName] = { x: (pos as TablePosition).x, y: (pos as TablePosition).y };
+            }
+            return acc;
+          }, {})
+        : {};
+
+    const relations = Array.isArray(parsed.relations)
+      ? parsed.relations.filter(
+          (relation): relation is VisualizerRelation =>
+            !!relation &&
+            typeof relation === "object" &&
+            typeof relation.id === "string" &&
+            typeof relation.fromTable === "string" &&
+            typeof relation.fromField === "string" &&
+            typeof relation.toTable === "string" &&
+            typeof relation.toField === "string",
+        )
+      : [];
+
+    const hidden = Array.isArray(parsed.hidden) ? parsed.hidden.filter((tableName): tableName is string => typeof tableName === "string") : [];
+
+    return { positions, relations, hidden };
+  } catch {
+    return defaults;
+  }
+};
 
 // Estimate card height so relation routing can target edges more accurately.
 function estimateCardHeight(table: VisualizerTable): number {
@@ -88,14 +146,16 @@ const DEFAULT_AI_QUESTIONS = [
   "Which relationships should be denormalized or materialized?",
 ] as const;
 
-export default function TableVisualizer({ onClose, onAskAI }: TableVisualizerProps) {
+export default function TableVisualizer({ onClose, onAskAI, onOpenVisualizerChat }: TableVisualizerProps) {
+  const persistedState = useRef<PersistedVisualizerState>(readPersistedVisualizerState());
+
   // Data, layout, and interaction state for the canvas and relation editor toolbar.
   const [tables, setTables] = useState<VisualizerTable[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [hidden, setHidden] = useState<Set<string>>(new Set());
-  const [positions, setPositions] = useState<Record<string, TablePosition>>({});
-  const [relations, setRelations] = useState<VisualizerRelation[]>([]);
+  const [hidden, setHidden] = useState<Set<string>>(new Set(persistedState.current.hidden));
+  const [positions, setPositions] = useState<Record<string, TablePosition>>(persistedState.current.positions);
+  const [relations, setRelations] = useState<VisualizerRelation[]>(persistedState.current.relations);
   const [selectedRelationId, setSelectedRelationId] = useState<string | null>(null);
   const [zoom, setZoom] = useState(1);
   const [fromTable, setFromTable] = useState("");
@@ -141,6 +201,53 @@ export default function TableVisualizer({ onClose, onAskAI }: TableVisualizerPro
       return next;
     });
   }, [tables]);
+
+  // Keep persisted hidden/relations aligned with currently loaded tables/fields.
+  useEffect(() => {
+    if (tables.length === 0) return;
+    const tableNames = new Set(tables.map((table) => table.name));
+    const fieldsByTable = new Map(tables.map((table) => [table.name, new Set(table.fields.map((field) => field.name))]));
+
+    setHidden((prev) => {
+      const next = new Set([...prev].filter((tableName) => tableNames.has(tableName)));
+      return next.size === prev.size ? prev : next;
+    });
+
+    setPositions((prev) => {
+      const nextEntries = Object.entries(prev).filter(([tableName]) => tableNames.has(tableName));
+      if (nextEntries.length === Object.keys(prev).length) return prev;
+      return Object.fromEntries(nextEntries);
+    });
+
+    setRelations((prev) => {
+      const seen = new Set<string>();
+      const next: VisualizerRelation[] = [];
+
+      for (const relation of prev) {
+        const fromFields = fieldsByTable.get(relation.fromTable);
+        const toFields = fieldsByTable.get(relation.toTable);
+        if (!fromFields || !toFields) continue;
+        if (!fromFields.has(relation.fromField) || !toFields.has(relation.toField)) continue;
+        if (relation.fromTable === relation.toTable && relation.fromField === relation.toField) continue;
+
+        const normalizedId = `${relation.fromTable}:${relation.fromField}->${relation.toTable}:${relation.toField}`;
+        if (seen.has(normalizedId)) continue;
+        seen.add(normalizedId);
+        next.push({ ...relation, id: normalizedId });
+      }
+      return next.length === prev.length && next.every((relation, index) => relation.id === prev[index].id) ? prev : next;
+    });
+  }, [tables]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const stateToPersist: PersistedVisualizerState = {
+      positions,
+      relations,
+      hidden: Array.from(hidden),
+    };
+    window.localStorage.setItem(VISUALIZER_STORAGE_KEY, JSON.stringify(stateToPersist));
+  }, [positions, relations, hidden]);
 
   // Auto-seed relation dropdown defaults once tables are available.
   useEffect(() => {
@@ -478,6 +585,9 @@ export default function TableVisualizer({ onClose, onAskAI }: TableVisualizerPro
 
         <div style={s.aiPromptRow}>
           <span style={s.aiPromptLabel}>Ask AI about this visible schema:</span>
+          <button style={s.aiOpenBtn} onClick={onOpenVisualizerChat}>
+            Open Visualizer Chat
+          </button>
           {DEFAULT_AI_QUESTIONS.map((question) => (
             <button key={question} style={s.aiPromptBtn} onClick={() => sendSnapshotToAI(question)}>
               {question}
@@ -741,6 +851,16 @@ const s: Record<string, CSSProperties> = {
     color: "#b8d3b2",
     padding: "5px 10px",
     fontSize: 11,
+    cursor: "pointer",
+  },
+  aiOpenBtn: {
+    border: "1px solid #2c4750",
+    borderRadius: 999,
+    background: "#0d1b20",
+    color: "#7dd3fc",
+    padding: "5px 10px",
+    fontSize: 11,
+    fontWeight: 700,
     cursor: "pointer",
   },
   hiddenLabel: {

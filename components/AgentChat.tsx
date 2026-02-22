@@ -57,9 +57,149 @@ interface ExecutionState {
   inputValues: Record<string, string>;
 }
 
+type ThreadMode = "table" | "visualizer";
+
+interface ChatThread {
+  id: string;
+  title: string;
+  mode: ThreadMode;
+  tableName: string;
+  createdAt: string;
+  updatedAt: string;
+  messages: UIMessage[];
+}
+
+interface PersistedAgentChatState {
+  threads: ChatThread[];
+}
+
+interface LegacyVisualizerChatState {
+  messages: UIMessage[];
+}
+
 // ─── Language options for quick-insert prompts ────────────────────────────
 const LANGUAGES = ["TypeScript", "JavaScript", "Python", "Go", "Java", "Rust"] as const;
 type Language = (typeof LANGUAGES)[number];
+const AGENT_CHAT_THREADS_KEY = "dynamoStudio.agentChat.threads.v1";
+const AGENT_CHAT_VISUALIZER_THREADS_KEY = "dynamoStudio.agentChat.visualizerThreads.v1";
+const AGENT_CHAT_VISUALIZER_LEGACY_KEY = "dynamoStudio.agentChat.visualizer";
+const MAX_THREADS = 25;
+
+const sanitizeMessages = (value: unknown): UIMessage[] => {
+  if (!Array.isArray(value)) return [];
+  return value.filter((message): message is UIMessage => {
+    if (!message || typeof message !== "object") return false;
+    const candidate = message as Partial<UIMessage>;
+    return typeof candidate.id === "string" && (candidate.role === "user" || candidate.role === "assistant" || candidate.role === "system") && Array.isArray(candidate.parts);
+  });
+};
+
+const makeThreadId = (): string => `thread-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+const threadDefaultTitle = (mode: ThreadMode, tableName: string): string => (mode === "visualizer" ? "Visualizer chat" : `New chat (${tableName || "no table"})`);
+
+const deriveThreadTitleFromMessages = (thread: ChatThread): string => {
+  const firstUser = thread.messages.find((message) => message.role === "user");
+  if (!firstUser) return threadDefaultTitle(thread.mode, thread.tableName);
+  const text = firstUser.parts
+    .filter((part) => part.type === "text")
+    .map((part) => part.text)
+    .join(" ")
+    .trim();
+  if (!text) return threadDefaultTitle(thread.mode, thread.tableName);
+  return text.length > 42 ? `${text.slice(0, 42)}...` : text;
+};
+
+const sanitizeThreads = (value: unknown): ChatThread[] => {
+  if (!Array.isArray(value)) return [];
+  const threads: ChatThread[] = [];
+  for (const raw of value) {
+    if (!raw || typeof raw !== "object") continue;
+    const candidate = raw as Partial<ChatThread>;
+    if (typeof candidate.id !== "string") continue;
+    if (candidate.mode !== "table" && candidate.mode !== "visualizer") continue;
+    if (typeof candidate.tableName !== "string") continue;
+    if (typeof candidate.createdAt !== "string" || typeof candidate.updatedAt !== "string") continue;
+    const messages = sanitizeMessages(candidate.messages);
+    const thread: ChatThread = {
+      id: candidate.id,
+      title: typeof candidate.title === "string" && candidate.title.trim() ? candidate.title : threadDefaultTitle(candidate.mode, candidate.tableName),
+      mode: candidate.mode,
+      tableName: candidate.tableName,
+      createdAt: candidate.createdAt,
+      updatedAt: candidate.updatedAt,
+      messages,
+    };
+    threads.push({ ...thread, title: deriveThreadTitleFromMessages(thread) });
+  }
+  return threads
+    .sort((left, right) => new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime())
+    .slice(0, MAX_THREADS);
+};
+
+const readPersistedThreads = (): ChatThread[] => {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = window.localStorage.getItem(AGENT_CHAT_THREADS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as Partial<PersistedAgentChatState>;
+    return sanitizeThreads(parsed.threads);
+  } catch {
+    return [];
+  }
+};
+
+const readPersistedVisualizerThreads = (): ChatThread[] => {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = window.localStorage.getItem(AGENT_CHAT_VISUALIZER_THREADS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as Partial<PersistedAgentChatState>;
+    return sanitizeThreads(parsed.threads).filter((thread) => thread.mode === "visualizer");
+  } catch {
+    return [];
+  }
+};
+
+const readLegacyVisualizerThread = (): ChatThread[] => {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = window.localStorage.getItem(AGENT_CHAT_VISUALIZER_LEGACY_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as Partial<LegacyVisualizerChatState>;
+    const messages = sanitizeMessages(parsed.messages);
+    if (messages.length === 0) return [];
+    const migrated: ChatThread = {
+      id: "legacy-visualizer-history",
+      title: "Visualizer chat",
+      mode: "visualizer",
+      tableName: "",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      messages,
+    };
+    return [{ ...migrated, title: deriveThreadTitleFromMessages(migrated) }];
+  } catch {
+    return [];
+  }
+};
+
+const writePersistedThreads = (threads: ChatThread[]): void => {
+  if (typeof window === "undefined") return;
+  const payload: PersistedAgentChatState = { threads: sanitizeThreads(threads) };
+  window.localStorage.setItem(AGENT_CHAT_THREADS_KEY, JSON.stringify(payload));
+};
+
+const writePersistedVisualizerThreads = (threads: ChatThread[]): void => {
+  if (typeof window === "undefined") return;
+  const payload: PersistedAgentChatState = { threads: sanitizeThreads(threads).filter((thread) => thread.mode === "visualizer") };
+  window.localStorage.setItem(AGENT_CHAT_VISUALIZER_THREADS_KEY, JSON.stringify(payload));
+};
+
+const areMessagesEqual = (left: UIMessage[], right: UIMessage[]): boolean => {
+  if (left.length !== right.length) return false;
+  return JSON.stringify(left) === JSON.stringify(right);
+};
 
 // ─── Quick prompt starters ────────────────────────────────────────────────
 const STARTERS = [
@@ -516,24 +656,35 @@ export default function AgentChat({ activeTable, schema, queuedPrompt, onQueuedP
   // UI state for language preference, panel mode, chat input, and per-card execution state.
   const [selectedLang, setSelectedLang] = useState<Language>("TypeScript");
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [threads, setThreads] = useState<ChatThread[]>([]);
+  const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [execStates, setExecStates] = useState<Record<string, ExecutionState>>({});
+  const hasInitializedThreadsRef = useRef(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const queuedHandledRef = useRef<Set<string>>(new Set());
   const queuedInFlightRef = useRef<string | null>(null);
+  const activeThread = useMemo(() => threads.find((thread) => thread.id === activeThreadId) ?? null, [threads, activeThreadId]);
+  const isVisualizerSession = activeThread?.mode === "visualizer";
+  const isTableSession = !isVisualizerSession;
+  const recentThreads = useMemo(() => threads.slice(0, 6), [threads]);
 
   // Transport carries table/schema context so responses stay scoped to current data model.
   const transport = useMemo(
     () =>
       new DefaultChatTransport({
         api: "/api/agent",
-        body: { activeTable, schema },
+        body: {
+          activeTable: isTableSession ? activeTable : "",
+          schema: isTableSession ? schema : null,
+          contextMode: isVisualizerSession ? "visualizer" : "table",
+        },
       }),
-    [activeTable, schema],
+    [activeTable, schema, isTableSession, isVisualizerSession],
   );
 
-  const { messages, sendMessage, status } = useChat({
+  const { messages, setMessages, sendMessage, status } = useChat({
     transport,
   });
   const isLoading = status === "submitted" || status === "streaming";
@@ -607,7 +758,7 @@ export default function AgentChat({ activeTable, schema, queuedPrompt, onQueuedP
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          activeTable,
+          activeTable: isTableSession ? activeTable : "",
           payload,
           inputs: ensureExecState(stateKey).inputValues,
         }),
@@ -638,6 +789,72 @@ export default function AgentChat({ activeTable, schema, queuedPrompt, onQueuedP
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  const selectThread = (threadId: string) => {
+    const thread = threads.find((item) => item.id === threadId);
+    if (!thread) return;
+    setActiveThreadId(threadId);
+    setMessages(thread.messages);
+    setExecStates({});
+  };
+
+  const createThread = (mode: ThreadMode, tableName: string, initialMessages: UIMessage[] = []): ChatThread => {
+    const now = new Date().toISOString();
+    const next: ChatThread = {
+      id: makeThreadId(),
+      title: threadDefaultTitle(mode, tableName),
+      mode,
+      tableName,
+      createdAt: now,
+      updatedAt: now,
+      messages: initialMessages,
+    };
+    return { ...next, title: deriveThreadTitleFromMessages(next) };
+  };
+
+  // On each chat open (component mount), start a new thread and show recents.
+  useEffect(() => {
+    const storedThreads = readPersistedThreads();
+    const storedVisualizerThreads = readPersistedVisualizerThreads();
+    const legacyVisualizerThread = readLegacyVisualizerThread();
+    const mergedById = new Map<string, ChatThread>();
+    [...storedThreads, ...storedVisualizerThreads, ...legacyVisualizerThread].forEach((thread) => mergedById.set(thread.id, thread));
+    const mergedThreads = Array.from(mergedById.values()).sort((left, right) => new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime());
+    const newThread = createThread("table", activeTable);
+    const nextThreads = [newThread, ...mergedThreads].slice(0, MAX_THREADS);
+    setThreads(nextThreads);
+    setActiveThreadId(newThread.id);
+    setMessages([]);
+    setExecStates({});
+    hasInitializedThreadsRef.current = true;
+  }, [setMessages, activeTable]);
+
+  // Persist thread list whenever it changes.
+  useEffect(() => {
+    if (!hasInitializedThreadsRef.current) return;
+    writePersistedThreads(threads);
+    writePersistedVisualizerThreads(threads);
+  }, [threads]);
+
+  // Keep active thread content in sync with useChat messages.
+  useEffect(() => {
+    if (!activeThreadId) return;
+    setThreads((prev) =>
+      prev
+        .map((thread) => {
+          if (thread.id !== activeThreadId) return thread;
+          if (areMessagesEqual(thread.messages, messages)) return thread;
+          const updated: ChatThread = {
+            ...thread,
+            messages,
+            updatedAt: new Date().toISOString(),
+          };
+          return { ...updated, title: deriveThreadTitleFromMessages(updated) };
+        })
+        .sort((left, right) => new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime())
+        .slice(0, MAX_THREADS),
+    );
+  }, [messages, activeThreadId]);
 
   // Focus input on open
   useEffect(() => {
@@ -691,11 +908,32 @@ export default function AgentChat({ activeTable, schema, queuedPrompt, onQueuedP
     if (queuedHandledRef.current.has(queuedPrompt.id)) return;
     if (queuedInFlightRef.current === queuedPrompt.id) return;
     if (isLoading) return;
+    if (!activeThreadId) return;
+
+    const isVisualizerPrompt = queuedPrompt.id.startsWith("visualizer-");
+    if (isVisualizerPrompt && !isVisualizerSession) {
+      const mostRecentVisualizerThread = threads.find((thread) => thread.mode === "visualizer");
+      if (mostRecentVisualizerThread) {
+        selectThread(mostRecentVisualizerThread.id);
+        return;
+      }
+      const newVisualizerThread = createThread("visualizer", "");
+      setThreads((prev) => [newVisualizerThread, ...prev].slice(0, MAX_THREADS));
+      setActiveThreadId(newVisualizerThread.id);
+      setMessages([]);
+      setExecStates({});
+      return;
+    }
 
     let canceled = false;
     const run = async () => {
       queuedInFlightRef.current = queuedPrompt.id;
       try {
+        if (!queuedPrompt.text.trim()) {
+          queuedHandledRef.current.add(queuedPrompt.id);
+          if (!canceled) onQueuedPromptHandled?.();
+          return;
+        }
         await sendMessage({ text: queuedPrompt.text });
         queuedHandledRef.current.add(queuedPrompt.id);
         if (!canceled) onQueuedPromptHandled?.();
@@ -708,7 +946,7 @@ export default function AgentChat({ activeTable, schema, queuedPrompt, onQueuedP
     return () => {
       canceled = true;
     };
-  }, [queuedPrompt, isLoading, sendMessage, onQueuedPromptHandled]);
+  }, [queuedPrompt, isLoading, sendMessage, onQueuedPromptHandled, activeThreadId, isVisualizerSession, setMessages, threads]);
 
   return (
     <div style={{ ...cs.panel, ...(isFullscreen ? cs.panelFullscreen : {}) }}>
@@ -722,7 +960,9 @@ export default function AgentChat({ activeTable, schema, queuedPrompt, onQueuedP
           <div>
             <div style={cs.headerTitle}>DynamoDB Studio Assistant</div>
             <div style={cs.headerSub}>
-              {activeTable ? (
+              {isVisualizerSession ? (
+                <span style={{ color: "#67e8f9" }}>Table Visualizer Chat · schema snapshot mode</span>
+              ) : activeTable ? (
                 <>
                   <span style={{ color: "#80FF00" }}>{activeTable}</span> · {schema?.pk}
                   {schema?.sk ? ` / ${schema.sk}` : ""}
@@ -743,6 +983,32 @@ export default function AgentChat({ activeTable, schema, queuedPrompt, onQueuedP
         </div>
       </div>
 
+      <div style={cs.threadBar}>
+        <button
+          style={cs.newThreadBtn}
+          onClick={() => {
+            const next = createThread(isVisualizerSession ? "visualizer" : "table", isVisualizerSession ? "" : activeTable);
+            setThreads((prev) => [next, ...prev].slice(0, MAX_THREADS));
+            setActiveThreadId(next.id);
+            setMessages([]);
+            setExecStates({});
+          }}
+        >
+          + New Chat
+        </button>
+        {recentThreads.length > 0 && <span style={cs.threadLabel}>Recent:</span>}
+        {recentThreads.map((thread) => (
+          <button
+            key={thread.id}
+            style={{ ...cs.threadChip, ...(thread.id === activeThreadId ? cs.threadChipActive : {}) }}
+            onClick={() => selectThread(thread.id)}
+            title={thread.title}
+          >
+            {thread.mode === "visualizer" ? "Visualizer" : thread.tableName || "No table"} · {thread.title}
+          </button>
+        ))}
+      </div>
+
       {/* ── Messages ── */}
       <div style={cs.messages}>
         {messages.length === 0 ? (
@@ -751,7 +1017,7 @@ export default function AgentChat({ activeTable, schema, queuedPrompt, onQueuedP
               <Bot size={28} color="#80FF00" />
             </div>
             <div style={cs.emptyTitle}>Ask me anything about</div>
-            <div style={{ ...cs.emptyTitle, color: "#80FF00" }}>{activeTable || "your DynamoDB tables"}</div>
+            <div style={{ ...cs.emptyTitle, color: "#80FF00" }}>{isVisualizerSession ? "your table visualizer snapshot" : activeTable || "your DynamoDB tables"}</div>
             <div style={cs.emptyStarters}>
               {STARTERS.map((s) => (
                 <button key={s.label} style={cs.starterBtn} onClick={() => submitStarter(s.prompt)}>
@@ -766,7 +1032,7 @@ export default function AgentChat({ activeTable, schema, queuedPrompt, onQueuedP
             const structuredExecPayloads = msg.role === "assistant" ? parseExecPayloads(rawContent) : [];
             const execPayloads =
               msg.role === "assistant" && structuredExecPayloads.length === 0
-                ? inferExecPayloadsFromCode(rawContent, activeTable)
+                ? inferExecPayloadsFromCode(rawContent, isTableSession ? activeTable : "")
                 : structuredExecPayloads;
             const displayContent = msg.role === "assistant" ? stripExecBlocks(rawContent) : rawContent;
             const renderExecCard = (payload: ExecPayload, index: number) => {
@@ -780,7 +1046,9 @@ export default function AgentChat({ activeTable, schema, queuedPrompt, onQueuedP
                 <div key={stateKey} style={cs.execCard}>
                   <div style={cs.execMetaRow}>
                     <span style={cs.execTag}>{payload.operation}</span>
-                    <span style={cs.execTable}>Table: {payload.tableName || activeTable || "current table"}</span>
+                    <span style={cs.execTable}>
+                      Table: {payload.tableName || (isTableSession ? activeTable || "current table" : "visualizer snapshot")}
+                    </span>
                   </div>
 
                   {showInputs && (
@@ -928,7 +1196,7 @@ export default function AgentChat({ activeTable, schema, queuedPrompt, onQueuedP
             style={cs.input}
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder={`Ask about ${activeTable || "your table"}...`}
+            placeholder={isVisualizerSession ? "Ask about the visualizer snapshot..." : `Ask about ${activeTable || "your table"}...`}
             disabled={isLoading}
             autoComplete="off"
           />
@@ -1013,6 +1281,50 @@ const cs: Record<string, CSSProperties> = {
     fontSize: 10,
     color: "#555",
     marginTop: 1,
+  },
+  threadBar: {
+    display: "flex",
+    alignItems: "center",
+    gap: 6,
+    padding: "8px 10px",
+    borderBottom: "1px solid #1a1a1a",
+    background: "#0a0f0a",
+    overflowX: "auto",
+    flexShrink: 0,
+  },
+  newThreadBtn: {
+    border: "1px solid #304f17",
+    background: "#13220a",
+    color: "#b7f37d",
+    borderRadius: 999,
+    fontSize: 11,
+    padding: "5px 10px",
+    cursor: "pointer",
+    whiteSpace: "nowrap",
+  },
+  threadLabel: {
+    fontSize: 10,
+    color: "#6e7d69",
+    marginLeft: 2,
+    whiteSpace: "nowrap",
+  },
+  threadChip: {
+    border: "1px solid #273227",
+    background: "#111711",
+    color: "#c7d2c4",
+    borderRadius: 999,
+    fontSize: 10,
+    padding: "5px 9px",
+    cursor: "pointer",
+    whiteSpace: "nowrap",
+    maxWidth: 220,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+  },
+  threadChipActive: {
+    border: "1px solid #67e8f9",
+    background: "#0e1f24",
+    color: "#bff4ff",
   },
   orb: {
     width: 28,

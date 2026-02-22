@@ -223,6 +223,12 @@ export default function DynamoStudio() {
     setQueuedAgentPrompt({ id: `visualizer-${Date.now()}`, text: prompt });
   };
 
+  const openVisualizerChatWithHistory = (): void => {
+    setVisualizerOpen(false);
+    setAgentOpen(true);
+    setQueuedAgentPrompt({ id: `visualizer-open-${Date.now()}`, text: "" });
+  };
+
   // ── On mount: load tables + region ───────────────────────────────────────
   useEffect(() => {
     const init = async (): Promise<void> => {
@@ -861,7 +867,9 @@ export default function DynamoStudio() {
       )}
 
       {/* ── Table Visualizer ── */}
-      {visualizerOpen && <TableVisualizer onClose={() => setVisualizerOpen(false)} onAskAI={askAgentFromVisualizer} />}
+      {visualizerOpen && (
+        <TableVisualizer onClose={() => setVisualizerOpen(false)} onAskAI={askAgentFromVisualizer} onOpenVisualizerChat={openVisualizerChatWithHistory} />
+      )}
 
       {/* ── AI Agent Chat ── */}
       {agentOpen && (
