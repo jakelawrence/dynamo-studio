@@ -1,6 +1,25 @@
 "use client";
 import { useState, useEffect, CSSProperties } from "react";
+import {
+  Bot,
+  Check,
+  Database,
+  Key,
+  Pencil,
+  Plus,
+  RefreshCw,
+  Search,
+  Table2,
+  Trash2,
+  X,
+} from "lucide-react";
 import AgentChat from "../components/AgentChat";
+import TableVisualizer from "../components/TableVisualizer";
+
+// DynamoStudio main page:
+// - Fetches table metadata/items from API routes
+// - Provides item browsing/editing/deleting flows
+// - Orchestrates auxiliary overlays (AI assistant + visualizer)
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 interface TableSchema {
@@ -44,24 +63,24 @@ interface FetchItemsResult {
 // ─── API Helpers ───────────────────────────────────────────────────────────
 
 async function fetchTables(): Promise<string[]> {
-  const res = await fetch("/api/tables");
-  if (!res.ok) throw new Error("Failed to fetch tables");
-  const data: { tables: string[] } = await res.json();
-  return data.tables;
+  const response = await fetch("/api/tables");
+  if (!response.ok) throw new Error("Failed to fetch tables");
+  const responseData: { tables: string[] } = await response.json();
+  return responseData.tables;
 }
 
 async function fetchSchema(tableName: string): Promise<TableSchema> {
-  const res = await fetch(`/api/tables/${encodeURIComponent(tableName)}`);
-  if (!res.ok) throw new Error(`Failed to fetch schema for ${tableName}`);
-  return res.json() as Promise<TableSchema>;
+  const response = await fetch(`/api/tables/${encodeURIComponent(tableName)}`);
+  if (!response.ok) throw new Error(`Failed to fetch schema for ${tableName}`);
+  return response.json() as Promise<TableSchema>;
 }
 
 // Fetches approximate itemCount + sizeBytes from DescribeTable.
 // AWS refreshes these every ~6 hours so we display them with a "~" prefix.
 async function fetchTableMeta(tableName: string): Promise<TableMeta> {
-  const res = await fetch(`/api/tables/${encodeURIComponent(tableName)}/meta`);
-  if (!res.ok) throw new Error(`Failed to fetch meta for ${tableName}`);
-  return res.json() as Promise<TableMeta>;
+  const response = await fetch(`/api/tables/${encodeURIComponent(tableName)}/meta`);
+  if (!response.ok) throw new Error(`Failed to fetch meta for ${tableName}`);
+  return response.json() as Promise<TableMeta>;
 }
 
 // Supports optional ExclusiveStartKey (pagination) and a search term.
@@ -80,64 +99,29 @@ async function fetchItems(
   if (searchTerm && searchTerm.trim()) {
     params.set("search", searchTerm.trim());
   }
-  const res = await fetch(`/api/tables/${encodeURIComponent(tableName)}/items?${params}`);
-  if (!res.ok) throw new Error(`Failed to fetch items for ${tableName}`);
-  const data: { items: DynamoItem[]; lastKey: DynamoKey | null } = await res.json();
-  return data;
+  const response = await fetch(`/api/tables/${encodeURIComponent(tableName)}/items?${params}`);
+  if (!response.ok) throw new Error(`Failed to fetch items for ${tableName}`);
+  const responseData: { items: DynamoItem[]; lastKey: DynamoKey | null } = await response.json();
+  return responseData;
 }
 
 async function putItem(tableName: string, item: DynamoItem): Promise<void> {
-  const res = await fetch(`/api/tables/${encodeURIComponent(tableName)}/items`, {
+  const response = await fetch(`/api/tables/${encodeURIComponent(tableName)}/items`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(item),
   });
-  if (!res.ok) throw new Error("Failed to save item");
+  if (!response.ok) throw new Error("Failed to save item");
 }
 
 async function deleteItem(tableName: string, key: DynamoItem): Promise<void> {
-  const res = await fetch(`/api/tables/${encodeURIComponent(tableName)}/items`, {
+  const response = await fetch(`/api/tables/${encodeURIComponent(tableName)}/items`, {
     method: "DELETE",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ key }),
   });
-  if (!res.ok) throw new Error("Failed to delete item");
+  if (!response.ok) throw new Error("Failed to delete item");
 }
-
-// ─── Icon Component ────────────────────────────────────────────────────────
-interface IconProps {
-  d: string;
-  size?: number;
-  className?: string;
-}
-
-const Icon = ({ d, size = 16, className = "" }: IconProps) => (
-  <svg
-    width={size}
-    height={size}
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth="1.8"
-    strokeLinecap="round"
-    strokeLinejoin="round"
-    className={className}
-  >
-    <path d={d} />
-  </svg>
-);
-
-const icons: Record<string, string> = {
-  table: "M3 3h18v18H3zM3 9h18M3 15h18M9 3v18M15 3v18",
-  plus: "M12 5v14M5 12h14",
-  edit: "M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z",
-  trash: "M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6",
-  search: "M21 21l-4.35-4.35M17 11A6 6 0 1 1 5 11a6 6 0 0 1 12 0z",
-  refresh: "M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15",
-  close: "M18 6L6 18M6 6l12 12",
-  check: "M20 6L9 17l-5-5",
-  key: "M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4",
-};
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
@@ -146,7 +130,7 @@ const icons: Record<string, string> = {
 const getColumns = (items: DynamoItem[], pk: string, sk: string | null): string[] => {
   if (!items?.length) return [];
   const all = new Set<string>();
-  items.forEach((item) => Object.keys(item).forEach((k) => all.add(k)));
+  items.forEach((item) => Object.keys(item).forEach((attributeName) => all.add(attributeName)));
   all.delete(pk);
   if (sk) all.delete(sk);
   return [pk, ...(sk ? [sk] : []), ...all];
@@ -154,29 +138,29 @@ const getColumns = (items: DynamoItem[], pk: string, sk: string | null): string[
 
 const OBJECT_PREVIEW_CHAR_LIMIT = 90;
 
-const stringifyValue = (v: unknown, pretty = false): string => {
-  if (v === null || v === undefined) return "null";
-  if (typeof v === "object") {
+const stringifyValue = (value: unknown, pretty = false): string => {
+  if (value === null || value === undefined) return "null";
+  if (typeof value === "object") {
     try {
-      return JSON.stringify(v, null, pretty ? 2 : 0);
+      return JSON.stringify(value, null, pretty ? 2 : 0);
     } catch {
       return "[Unserializable Object]";
     }
   }
-  return String(v);
+  return String(value);
 };
 
 const truncateValue = (value: string, max: number): string => (value.length > max ? `${value.slice(0, max)}...` : value);
 
-const isObjectLike = (v: unknown): boolean => typeof v === "object" && v !== null;
+const isObjectLike = (value: unknown): boolean => typeof value === "object" && value !== null;
 
-const formatVal = (v: unknown): React.ReactNode => {
-  if (v === null || v === undefined) return <span style={{ color: "#555" }}>null</span>;
-  if (isObjectLike(v)) return <span style={{ color: "#a7f3d0" }}>{truncateValue(stringifyValue(v), OBJECT_PREVIEW_CHAR_LIMIT)}</span>;
-  if (typeof v === "boolean") return <span style={{ color: v ? "#4ade80" : "#f87171" }}>{String(v)}</span>;
-  if (typeof v === "number") return <span style={{ color: "#67e8f9" }}>{v}</span>;
-  if (typeof v === "string" && v.match(/^\d{4}-\d{2}-\d{2}/)) return <span style={{ color: "#c4b5fd" }}>{v}</span>;
-  return String(v);
+const formatVal = (value: unknown): React.ReactNode => {
+  if (value === null || value === undefined) return <span style={{ color: "#555" }}>null</span>;
+  if (isObjectLike(value)) return <span style={{ color: "#a7f3d0" }}>{truncateValue(stringifyValue(value), OBJECT_PREVIEW_CHAR_LIMIT)}</span>;
+  if (typeof value === "boolean") return <span style={{ color: value ? "#4ade80" : "#f87171" }}>{String(value)}</span>;
+  if (typeof value === "number") return <span style={{ color: "#67e8f9" }}>{value}</span>;
+  if (typeof value === "string" && value.match(/^\d{4}-\d{2}-\d{2}/)) return <span style={{ color: "#c4b5fd" }}>{value}</span>;
+  return String(value);
 };
 
 const formatBytes = (bytes: number): string => {
@@ -187,6 +171,7 @@ const formatBytes = (bytes: number): string => {
 
 // ─── Main Component ────────────────────────────────────────────────────────
 export default function DynamoStudio() {
+  // Data state for the currently selected table and its rows.
   const [tables, setTables] = useState<string[]>([]);
   const [activeTable, setActiveTable] = useState<string>("");
   const [schema, setSchema] = useState<TableSchema>({ pk: "", sk: null, gsi: [] });
@@ -199,6 +184,7 @@ export default function DynamoStudio() {
   const [activeSearch, setActiveSearch] = useState<string>("");
   const [isSearching, setIsSearching] = useState<boolean>(false);
 
+  // UI interaction state (dialogs, toasts, sorting, selection, overlays).
   const [modal, setModal] = useState<ModalState | null>(null);
   const [jsonViewer, setJsonViewer] = useState<JsonViewerState | null>(null);
   const [formData, setFormData] = useState<DynamoItem>({});
@@ -211,6 +197,8 @@ export default function DynamoStudio() {
   const [sortDir, setSortDir] = useState<SortDir>("asc");
   const [awsRegion, setAwsRegion] = useState<string>("");
   const [agentOpen, setAgentOpen] = useState<boolean>(false);
+  const [visualizerOpen, setVisualizerOpen] = useState<boolean>(false);
+  const [queuedAgentPrompt, setQueuedAgentPrompt] = useState<{ id: string; text: string } | null>(null);
 
   // ── Pagination ────────────────────────────────────────────────────────────
   const PAGE_SIZE_OPTIONS = [10, 25, 50, 100] as const;
@@ -224,9 +212,15 @@ export default function DynamoStudio() {
   // Approximate total pages — only meaningful outside of an active search
   const approxTotalPages = tableMeta && !activeSearch ? Math.max(1, Math.ceil(tableMeta.itemCount / pageSize)) : null;
 
-  const showToast = (msg: string, type: ToastState["type"] = "success"): void => {
-    setToast({ msg, type });
+  const showToast = (message: string, type: ToastState["type"] = "success"): void => {
+    setToast({ msg: message, type });
     setTimeout(() => setToast(null), 2800);
+  };
+
+  const askAgentFromVisualizer = (prompt: string): void => {
+    setVisualizerOpen(false);
+    setAgentOpen(true);
+    setQueuedAgentPrompt({ id: `visualizer-${Date.now()}`, text: prompt });
   };
 
   // ── On mount: load tables + region ───────────────────────────────────────
@@ -236,9 +230,9 @@ export default function DynamoStudio() {
         const tableList = await fetchTables();
         setTables(tableList);
         if (tableList.length > 0) await switchTable(tableList[0]);
-      } catch (err) {
+      } catch (error) {
         showToast("Failed to connect to DynamoDB", "error");
-        console.error(err);
+        console.error(error);
       } finally {
         setTablesLoading(false);
       }
@@ -248,15 +242,15 @@ export default function DynamoStudio() {
 
   useEffect(() => {
     fetch("/api/region")
-      .then((r) => r.json())
-      .then((d: { region?: string }) => setAwsRegion(d.region ?? ""))
+      .then((regionResponse) => regionResponse.json())
+      .then((regionData: { region?: string }) => setAwsRegion(regionData.region ?? ""))
       .catch(() => {});
   }, []);
 
   // ── Switch table ──────────────────────────────────────────────────────────
-  const switchTable = async (t: string): Promise<void> => {
+  const switchTable = async (tableName: string): Promise<void> => {
     setLoading(true);
-    setActiveTable(t);
+    setActiveTable(tableName);
     setSearchInput("");
     setActiveSearch("");
     setSelectedRows(new Set());
@@ -266,14 +260,18 @@ export default function DynamoStudio() {
     setLastKey(null);
     setTableMeta(null);
     try {
-      const [schemaData, result, meta] = await Promise.all([fetchSchema(t), fetchItems(t, null, pageSize), fetchTableMeta(t)]);
+      const [schemaData, itemsResult, metadata] = await Promise.all([
+        fetchSchema(tableName),
+        fetchItems(tableName, null, pageSize),
+        fetchTableMeta(tableName),
+      ]);
       setSchema(schemaData);
-      setItems(result.items);
-      setLastKey(result.lastKey);
-      setTableMeta(meta);
-    } catch (err) {
-      showToast(`Failed to load ${t}`, "error");
-      console.error(err);
+      setItems(itemsResult.items);
+      setLastKey(itemsResult.lastKey);
+      setTableMeta(metadata);
+    } catch (error) {
+      showToast(`Failed to load ${tableName}`, "error");
+      console.error(error);
     } finally {
       setLoading(false);
     }
@@ -289,12 +287,12 @@ export default function DynamoStudio() {
     setCursorStack([null]);
     setSelectedRows(new Set());
     try {
-      const result = await fetchItems(activeTable, null, pageSize, term || undefined);
-      setItems(result.items);
-      setLastKey(result.lastKey);
-    } catch (err) {
+      const itemsResult = await fetchItems(activeTable, null, pageSize, term || undefined);
+      setItems(itemsResult.items);
+      setLastKey(itemsResult.lastKey);
+    } catch (error) {
       showToast("Search failed", "error");
-      console.error(err);
+      console.error(error);
     } finally {
       setLoading(false);
       setIsSearching(false);
@@ -310,19 +308,19 @@ export default function DynamoStudio() {
     setCursorStack([null]);
     setSelectedRows(new Set());
     try {
-      const result = await fetchItems(activeTable, null, pageSize);
-      setItems(result.items);
-      setLastKey(result.lastKey);
-    } catch (err) {
+      const itemsResult = await fetchItems(activeTable, null, pageSize);
+      setItems(itemsResult.items);
+      setLastKey(itemsResult.lastKey);
+    } catch (error) {
       showToast("Failed to reload table", "error");
-      console.error(err);
+      console.error(error);
     } finally {
       setLoading(false);
     }
   };
 
-  const handleSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>): void => {
-    if (e.key === "Enter") commitSearch();
+  const handleSearchKeyDown = (keyboardEvent: React.KeyboardEvent<HTMLInputElement>): void => {
+    if (keyboardEvent.key === "Enter") commitSearch();
   };
 
   // ── Next page ─────────────────────────────────────────────────────────────
@@ -331,14 +329,14 @@ export default function DynamoStudio() {
     setLoading(true);
     setSelectedRows(new Set());
     try {
-      const result = await fetchItems(activeTable, lastKey, pageSize, activeSearch || undefined);
-      setCursorStack((prev) => [...prev, lastKey]);
-      setCurrentPage((p) => p + 1);
-      setItems(result.items);
-      setLastKey(result.lastKey);
-    } catch (err) {
+      const itemsResult = await fetchItems(activeTable, lastKey, pageSize, activeSearch || undefined);
+      setCursorStack((previousCursors) => [...previousCursors, lastKey]);
+      setCurrentPage((previousPage) => previousPage + 1);
+      setItems(itemsResult.items);
+      setLastKey(itemsResult.lastKey);
+    } catch (error) {
       showToast("Failed to load next page", "error");
-      console.error(err);
+      console.error(error);
     } finally {
       setLoading(false);
     }
@@ -352,33 +350,33 @@ export default function DynamoStudio() {
     try {
       const prevStack = cursorStack.slice(0, -1);
       const prevCursor = prevStack[prevStack.length - 1];
-      const result = await fetchItems(activeTable, prevCursor, pageSize, activeSearch || undefined);
+      const itemsResult = await fetchItems(activeTable, prevCursor, pageSize, activeSearch || undefined);
       setCursorStack(prevStack);
-      setCurrentPage((p) => p - 1);
-      setItems(result.items);
-      setLastKey(result.lastKey);
-    } catch (err) {
+      setCurrentPage((previousPage) => previousPage - 1);
+      setItems(itemsResult.items);
+      setLastKey(itemsResult.lastKey);
+    } catch (error) {
       showToast("Failed to load previous page", "error");
-      console.error(err);
+      console.error(error);
     } finally {
       setLoading(false);
     }
   };
 
   // ── Change page size ──────────────────────────────────────────────────────
-  const changePageSize = async (size: number): Promise<void> => {
-    setPageSize(size);
+  const changePageSize = async (nextPageSize: number): Promise<void> => {
+    setPageSize(nextPageSize);
     setLoading(true);
     setCurrentPage(1);
     setCursorStack([null]);
     setSelectedRows(new Set());
     try {
-      const result = await fetchItems(activeTable, null, size, activeSearch || undefined);
-      setItems(result.items);
-      setLastKey(result.lastKey);
-    } catch (err) {
+      const itemsResult = await fetchItems(activeTable, null, nextPageSize, activeSearch || undefined);
+      setItems(itemsResult.items);
+      setLastKey(itemsResult.lastKey);
+    } catch (error) {
       showToast("Failed to reload table", "error");
-      console.error(err);
+      console.error(error);
     } finally {
       setLoading(false);
     }
@@ -386,27 +384,31 @@ export default function DynamoStudio() {
 
   // Client-side sort of the current page only
   const sorted: DynamoItem[] = sortCol
-    ? [...items].sort((a, b) => {
-        const av = a[sortCol],
-          bv = b[sortCol];
-        const cmp = typeof av === "number" && typeof bv === "number" ? av - bv : String(av).localeCompare(String(bv));
-        return sortDir === "asc" ? cmp : -cmp;
+    ? [...items].sort((leftItem, rightItem) => {
+        const leftValue = leftItem[sortCol];
+        const rightValue = rightItem[sortCol];
+        const comparison =
+          typeof leftValue === "number" && typeof rightValue === "number"
+            ? leftValue - rightValue
+            : String(leftValue).localeCompare(String(rightValue));
+        return sortDir === "asc" ? comparison : -comparison;
       })
     : items;
 
-  const handleSort = (col: string): void => {
-    if (sortCol === col) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+  const handleSort = (columnName: string): void => {
+    if (sortCol === columnName) setSortDir((currentDirection) => (currentDirection === "asc" ? "desc" : "asc"));
     else {
-      setSortCol(col);
+      setSortCol(columnName);
       setSortDir("asc");
     }
   };
 
+  // Stable identity per row based on key attributes so selection/edit actions remain deterministic.
   const rowKey = (item: DynamoItem): string => String(item[schema.pk]) + (schema.sk ? `|${item[schema.sk]}` : "");
 
   const openAdd = (): void => {
     const blank: DynamoItem = {};
-    columns.forEach((c) => (blank[c] = ""));
+    columns.forEach((columnName) => (blank[columnName] = ""));
     setFormData(blank);
     setModal({ type: "add" });
   };
@@ -425,9 +427,9 @@ export default function DynamoStudio() {
       await switchTable(activeTable);
       showToast(modal?.type === "add" ? "Item created successfully" : "Item updated successfully");
       setModal(null);
-    } catch (err) {
+    } catch (error) {
       showToast("Failed to save item", "error");
-      console.error(err);
+      console.error(error);
     } finally {
       setSaving(false);
     }
@@ -443,9 +445,9 @@ export default function DynamoStudio() {
       await switchTable(activeTable);
       showToast("Item deleted", "error");
       setModal(null);
-    } catch (err) {
+    } catch (error) {
       showToast("Failed to delete item", "error");
-      console.error(err);
+      console.error(error);
     } finally {
       setSaving(false);
     }
@@ -455,9 +457,9 @@ export default function DynamoStudio() {
     setSaving(true);
     const count = selectedRows.size;
     try {
-      const targets = sorted.filter((i) => selectedRows.has(rowKey(i)));
+      const selectedItems = sorted.filter((item) => selectedRows.has(rowKey(item)));
       await Promise.all(
-        targets.map((item) => {
+        selectedItems.map((item) => {
           const key: DynamoItem = { [schema.pk]: item[schema.pk] };
           if (schema.sk) key[schema.sk] = item[schema.sk];
           return deleteItem(activeTable, key);
@@ -466,19 +468,19 @@ export default function DynamoStudio() {
       setSelectedRows(new Set());
       await switchTable(activeTable);
       showToast(`${count} items deleted`, "error");
-    } catch (err) {
+    } catch (error) {
       showToast("Failed to delete some items", "error");
-      console.error(err);
+      console.error(error);
     } finally {
       setSaving(false);
     }
   };
 
-  const toggleRow = (id: unknown): void => {
-    setSelectedRows((prev) => {
-      const next = new Set(prev);
-      next.has(id) ? next.delete(id) : next.add(id);
-      return next;
+  const toggleRow = (rowIdentifier: unknown): void => {
+    setSelectedRows((previousSelection) => {
+      const nextSelection = new Set(previousSelection);
+      nextSelection.has(rowIdentifier) ? nextSelection.delete(rowIdentifier) : nextSelection.add(rowIdentifier);
+      return nextSelection;
     });
   };
 
@@ -488,38 +490,33 @@ export default function DynamoStudio() {
   };
 
   return (
-    <div style={s.root}>
+    <div style={styles.root}>
       {/* ── Sidebar ── */}
-      <aside style={s.sidebar}>
-        <div style={s.logo}>
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#80FF00" strokeWidth="2">
-            <ellipse cx="12" cy="5" rx="9" ry="3" />
-            <path d="M3 5v4c0 1.66 4.03 3 9 3s9-1.34 9-3V5" />
-            <path d="M3 9v4c0 1.66 4.03 3 9 3s9-1.34 9-3V9" />
-            <path d="M3 13v4c0 1.66 4.03 3 9 3s9-1.34 9-3v-4" />
-          </svg>
-          <span style={s.logoText}>DynamoStudio</span>
+      <aside style={styles.sidebar}>
+        <div style={styles.logo}>
+          <Database size={22} color="#80FF00" />
+          <span style={styles.logoText}>DynamoStudio</span>
         </div>
 
-        <div style={s.sideSection}>
-          <div style={s.sideSectionLabel}>TABLES ({tables.length})</div>
+        <div style={styles.sideSection}>
+          <div style={styles.sideSectionLabel}>TABLES ({tables.length})</div>
           {tablesLoading ? (
             <div style={{ padding: "12px 8px", display: "flex", alignItems: "center", gap: 8 }}>
-              <div style={{ ...s.spinner, width: 12, height: 12, borderWidth: 1.5 }} />
+              <div style={{ ...styles.spinner, width: 12, height: 12, borderWidth: 1.5 }} />
               <span style={{ fontSize: 11, color: "#444" }}>Connecting...</span>
             </div>
           ) : tables.length === 0 ? (
             <div style={{ padding: "12px 8px", fontSize: 11, color: "#444" }}>No tables found</div>
           ) : (
-            tables.map((t) => (
+            tables.map((tableName) => (
               <button
-                key={t}
-                onClick={() => switchTable(t)}
+                key={tableName}
+                onClick={() => switchTable(tableName)}
                 disabled={loading}
-                style={{ ...s.tableBtn, ...(activeTable === t ? s.tableBtnActive : {}) }}
+                style={{ ...styles.tableBtn, ...(activeTable === tableName ? styles.tableBtnActive : {}) }}
               >
-                <Icon d={icons.table} size={14} />
-                <span style={{ marginLeft: 8 }}>{t}</span>
+                <Table2 size={14} />
+                <span style={{ marginLeft: 8 }}>{tableName}</span>
               </button>
             ))
           )}
@@ -527,28 +524,28 @@ export default function DynamoStudio() {
 
         <div style={{ marginTop: "auto", padding: "16px 12px", borderTop: "1px solid #1e1e1e" }}>
           {tableMeta && (
-            <div style={s.sidebarMeta}>
-              <span style={s.sidebarMetaVal}>~{tableMeta.itemCount.toLocaleString()}</span>
-              <span style={s.sidebarMetaLabel}>records</span>
-              <span style={s.sidebarMetaDot}>·</span>
-              <span style={s.sidebarMetaVal}>{formatBytes(tableMeta.sizeBytes)}</span>
+            <div style={styles.sidebarMeta}>
+              <span style={styles.sidebarMetaVal}>~{tableMeta.itemCount.toLocaleString()}</span>
+              <span style={styles.sidebarMetaLabel}>records</span>
+              <span style={styles.sidebarMetaDot}>·</span>
+              <span style={styles.sidebarMetaVal}>{formatBytes(tableMeta.sizeBytes)}</span>
             </div>
           )}
-          <div style={{ ...s.connBadge, marginTop: tableMeta ? 8 : 0 }}>
-            <div style={s.connDot} />
+          <div style={{ ...styles.connBadge, marginTop: tableMeta ? 8 : 0 }}>
+            <div style={styles.connDot} />
             <span style={{ fontSize: 11, color: "#666" }}>{awsRegion ? `${awsRegion} · dynamodb` : "unknown · dynamodb"}</span>
           </div>
         </div>
       </aside>
 
       {/* ── Main ── */}
-      <main style={s.main}>
+      <main style={styles.main}>
         {/* Header */}
-        <header style={s.header}>
+        <header style={styles.header}>
           <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-            <h1 style={s.tableName}>{activeTable}</h1>
-            <div style={s.schemaTag}>
-              <Icon d={icons.key} size={12} />
+            <h1 style={styles.tableName}>{activeTable}</h1>
+            <div style={styles.schemaTag}>
+              <Key size={12} />
               <span style={{ marginLeft: 4 }}>{schema.pk}</span>
               {schema.sk && (
                 <>
@@ -557,71 +554,76 @@ export default function DynamoStudio() {
                 </>
               )}
             </div>
-            {schema.gsi.length > 0 && <div style={{ ...s.schemaTag, background: "#1a1a2e", color: "#818cf8" }}>GSI: {schema.gsi.join(", ")}</div>}
+            {schema.gsi.length > 0 && <div style={{ ...styles.schemaTag, background: "#1a1a2e", color: "#818cf8" }}>GSI: {schema.gsi.join(", ")}</div>}
             {/* Approximate record count — shown with ~ and tooltip to explain */}
             {tableMeta && (
-              <div style={s.recordCountBadge} title="Approximate count from DescribeTable. AWS refreshes this every ~6 hours.">
+              <div style={styles.recordCountBadge} title="Approximate count from DescribeTable. AWS refreshes this every ~6 hours.">
                 ~{tableMeta.itemCount.toLocaleString()} records
               </div>
             )}
           </div>
           <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
-            <button style={s.btnSecondary} onClick={() => switchTable(activeTable)} disabled={loading}>
-              <Icon d={icons.refresh} size={14} />
+            <button style={styles.btnSecondary} onClick={() => switchTable(activeTable)} disabled={loading}>
+              <RefreshCw size={14} />
               <span style={{ marginLeft: 6 }}>Refresh</span>
             </button>
-            <button style={s.btnPrimary} onClick={openAdd}>
-              <Icon d={icons.plus} size={14} />
+            <button style={styles.btnPrimary} onClick={openAdd}>
+              <Plus size={14} />
               <span style={{ marginLeft: 6 }}>Add Item</span>
             </button>
+            <button style={styles.btnSecondary} onClick={() => setVisualizerOpen(true)} title="Open table visualizer">
+              <Table2 size={14} />
+              <span style={{ marginLeft: 6 }}>Visualizer</span>
+            </button>
             <button
-              style={{ ...s.btnSecondary, ...(agentOpen ? s.btnAgentActive : {}) }}
-              onClick={() => setAgentOpen((v) => !v)}
+              style={{ ...styles.btnSecondary, ...(agentOpen ? styles.btnAgentActive : {}) }}
+              onClick={() => setAgentOpen((isCurrentlyOpen) => !isCurrentlyOpen)}
               title="Open AI Assistant"
             >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
-                <path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20z" />
-                <path d="M12 16v-4M12 8h.01" />
-              </svg>
+              <Bot size={14} />
               <span style={{ marginLeft: 6 }}>Ask AI</span>
             </button>
           </div>
         </header>
 
         {/* Toolbar */}
-        <div style={s.toolbar}>
+        <div style={styles.toolbar}>
           {/* Full-table search — commits on Enter or Search button click */}
-          <div style={s.searchWrap}>
+          <div style={styles.searchWrap}>
             <input
-              style={{ ...s.searchInput, ...(activeSearch ? s.searchInputActive : {}) }}
+              style={{ ...styles.searchInput, ...(activeSearch ? styles.searchInputActive : {}) }}
               placeholder={
                 schema.pk ? `Search by PK (${schema.pk})${schema.sk ? ` or SK (${schema.sk})` : ""} — press Enter` : "Search by PK / SK..."
               }
               value={searchInput}
-              onChange={(e) => setSearchInput(e.target.value)}
+              onChange={(changeEvent) => setSearchInput(changeEvent.target.value)}
               onKeyDown={handleSearchKeyDown}
             />
             {activeSearch && (
-              <button style={s.searchClearBtn} onClick={clearSearch} title="Clear search">
-                <Icon d={icons.close} size={12} />
+              <button style={styles.searchClearBtn} onClick={clearSearch} title="Clear search">
+                <X size={12} />
               </button>
             )}
-            <button style={{ ...s.searchBtn, ...(isSearching ? s.searchBtnActive : {}) }} onClick={commitSearch} disabled={isSearching || loading}>
-              {isSearching ? <div style={{ ...s.spinner, width: 11, height: 11, borderWidth: 1.5 }} /> : <Icon d={icons.search} size={13} />}
+            <button
+              style={{ ...styles.searchBtn, ...(isSearching ? styles.searchBtnActive : {}) }}
+              onClick={commitSearch}
+              disabled={isSearching || loading}
+            >
+              {isSearching ? <div style={{ ...styles.spinner, width: 11, height: 11, borderWidth: 1.5 }} /> : <Search size={13} />}
               <span style={{ marginLeft: 5 }}>{isSearching ? "Searching..." : "Search"}</span>
             </button>
           </div>
 
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
             {/* "25 items on page 1 of ~12" */}
-            <span style={s.countLabel}>
+            <span style={styles.countLabel}>
               {items.length} item{items.length !== 1 ? "s" : ""} on page {currentPage}
               {approxTotalPages !== null ? <span style={{ color: "#3a3a3a" }}> of ~{approxTotalPages}</span> : null}
-              {activeSearch && <span style={s.searchPill}>"{activeSearch}"</span>}
+              {activeSearch && <span style={styles.searchPill}>"{activeSearch}"</span>}
             </span>
             {selectedRows.size > 0 && (
-              <button style={s.btnDanger} onClick={handleBulkDelete}>
-                <Icon d={icons.trash} size={13} />
+              <button style={styles.btnDanger} onClick={handleBulkDelete}>
+                <Trash2 size={13} />
                 <span style={{ marginLeft: 5 }}>Delete {selectedRows.size}</span>
               </button>
             )}
@@ -629,73 +631,77 @@ export default function DynamoStudio() {
         </div>
 
         {/* Table */}
-        <div style={s.tableWrap}>
+        <div style={styles.tableWrap}>
           {loading ? (
-            <div style={s.loadingState}>
-              <div style={s.spinner} />
+            <div style={styles.loadingState}>
+              <div style={styles.spinner} />
               <span style={{ color: "#555", marginTop: 12, fontSize: 13 }}>
                 {isSearching ? `Searching ${activeTable}...` : `Loading ${activeTable}...`}
               </span>
             </div>
           ) : (
-            <table style={s.table}>
+            <table style={styles.table}>
               <thead>
                 <tr>
-                  <th style={{ ...s.th, width: 40 }}>
+                  <th style={{ ...styles.th, width: 40 }}>
                     <input
                       type="checkbox"
-                      style={s.checkbox}
+                      style={styles.checkbox}
                       checked={selectedRows.size === sorted.length && sorted.length > 0}
                       onChange={toggleAll}
                     />
                   </th>
-                  {columns.map((col) => (
-                    <th key={col} style={{ ...s.th, cursor: "pointer" }} onClick={() => handleSort(col)}>
+                  {columns.map((columnName) => (
+                    <th key={columnName} style={{ ...styles.th, cursor: "pointer" }} onClick={() => handleSort(columnName)}>
                       <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                        <span style={col === schema.pk || col === schema.sk ? { color: "#80FF00" } : {}}>{col}</span>
-                        {col === schema.pk && <span style={s.pkBadge}>PK</span>}
-                        {col === schema.sk && <span style={s.skBadge}>SK</span>}
-                        {sortCol === col && <span style={{ color: "#80FF00", fontSize: 10 }}>{sortDir === "asc" ? "↑" : "↓"}</span>}
+                        <span style={columnName === schema.pk || columnName === schema.sk ? { color: "#80FF00" } : {}}>{columnName}</span>
+                        {columnName === schema.pk && <span style={styles.pkBadge}>PK</span>}
+                        {columnName === schema.sk && <span style={styles.skBadge}>SK</span>}
+                        {sortCol === columnName && <span style={{ color: "#80FF00", fontSize: 10 }}>{sortDir === "asc" ? "↑" : "↓"}</span>}
                       </div>
                     </th>
                   ))}
-                  <th style={{ ...s.th, width: 100, textAlign: "right" }}>Actions</th>
+                  <th style={{ ...styles.th, width: 100, textAlign: "right" }}>Actions</th>
                 </tr>
               </thead>
               <tbody>
                 {sorted.length === 0 ? (
                   <tr>
-                    <td colSpan={columns.length + 2} style={s.emptyCell}>
+                    <td colSpan={columns.length + 2} style={styles.emptyCell}>
                       {activeSearch ? `No records found matching "${activeSearch}"` : "No items found"}
                     </td>
                   </tr>
                 ) : (
-                  sorted.map((item, idx) => {
-                    const rk = rowKey(item);
-                    const isSelected = selectedRows.has(rk);
+                  sorted.map((item, itemIndex) => {
+                    const rowIdentifier = rowKey(item);
+                    const isSelected = selectedRows.has(rowIdentifier);
                     return (
-                      <tr key={rk ?? idx} style={{ ...s.tr, ...(isSelected ? s.trSelected : {}) }}>
-                        <td style={s.td}>
-                          <input type="checkbox" style={s.checkbox} checked={isSelected} onChange={() => toggleRow(rk)} />
+                      <tr key={rowIdentifier ?? itemIndex} style={{ ...styles.tr, ...(isSelected ? styles.trSelected : {}) }}>
+                        <td style={styles.td}>
+                          <input type="checkbox" style={styles.checkbox} checked={isSelected} onChange={() => toggleRow(rowIdentifier)} />
                         </td>
-                        {columns.map((col) => (
-                          <td key={col} style={s.td}>
-                            {isObjectLike(item[col]) ? (
-                              <button style={s.cellJsonBtn} onClick={() => setJsonViewer({ column: col, value: item[col] })} title="View full JSON">
-                                <span style={s.cellVal}>{formatVal(item[col])}</span>
+                        {columns.map((columnName) => (
+                          <td key={columnName} style={styles.td}>
+                            {isObjectLike(item[columnName]) ? (
+                              <button
+                                style={styles.cellJsonBtn}
+                                onClick={() => setJsonViewer({ column: columnName, value: item[columnName] })}
+                                title="View full JSON"
+                              >
+                                <span style={styles.cellVal}>{formatVal(item[columnName])}</span>
                               </button>
                             ) : (
-                              <span style={s.cellVal}>{formatVal(item[col])}</span>
+                              <span style={styles.cellVal}>{formatVal(item[columnName])}</span>
                             )}
                           </td>
                         ))}
-                        <td style={{ ...s.td, textAlign: "right" }}>
+                        <td style={{ ...styles.td, textAlign: "right" }}>
                           <div style={{ display: "flex", gap: 4, justifyContent: "flex-end" }}>
-                            <button style={s.iconBtn} onClick={() => openEdit(item)} title="Edit">
-                              <Icon d={icons.edit} size={13} />
+                            <button style={styles.iconBtn} onClick={() => openEdit(item)} title="Edit">
+                              <Pencil size={13} />
                             </button>
-                            <button style={{ ...s.iconBtn, ...s.iconBtnDanger }} onClick={() => openDelete(item)} title="Delete">
-                              <Icon d={icons.trash} size={13} />
+                            <button style={{ ...styles.iconBtn, ...styles.iconBtnDanger }} onClick={() => openDelete(item)} title="Delete">
+                              <Trash2 size={13} />
                             </button>
                           </div>
                         </td>
@@ -709,7 +715,7 @@ export default function DynamoStudio() {
         </div>
 
         {/* Pagination Footer */}
-        <div style={s.statusBar}>
+        <div style={styles.statusBar}>
           <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
             <span style={{ color: "#444", fontSize: 11 }}>
               {activeTable} · {columns.length} attributes
@@ -717,10 +723,10 @@ export default function DynamoStudio() {
             </span>
             <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
               <span style={{ color: "#3a3a3a", fontSize: 11 }}>Rows per page:</span>
-              <select value={pageSize} onChange={(e) => changePageSize(Number(e.target.value))} style={s.pageSizeSelect}>
-                {PAGE_SIZE_OPTIONS.map((n) => (
-                  <option key={n} value={n}>
-                    {n}
+              <select value={pageSize} onChange={(changeEvent) => changePageSize(Number(changeEvent.target.value))} style={styles.pageSizeSelect}>
+                {PAGE_SIZE_OPTIONS.map((pageSizeOption) => (
+                  <option key={pageSizeOption} value={pageSizeOption}>
+                    {pageSizeOption}
                   </option>
                 ))}
               </select>
@@ -735,16 +741,16 @@ export default function DynamoStudio() {
               {lastKey ? " · more available" : ""}
             </span>
             <button
-              style={{ ...s.pageBtn, ...(currentPage <= 1 ? s.pageBtnDisabled : {}) }}
+              style={{ ...styles.pageBtn, ...(currentPage <= 1 ? styles.pageBtnDisabled : {}) }}
               onClick={goPrevPage}
               disabled={currentPage <= 1 || loading}
               title="Previous page"
             >
               ←
             </button>
-            <span style={s.pageNum}>{currentPage}</span>
+            <span style={styles.pageNum}>{currentPage}</span>
             <button
-              style={{ ...s.pageBtn, ...(!lastKey ? s.pageBtnDisabled : {}) }}
+              style={{ ...styles.pageBtn, ...(!lastKey ? styles.pageBtnDisabled : {}) }}
               onClick={goNextPage}
               disabled={!lastKey || loading}
               title="Next page"
@@ -757,39 +763,41 @@ export default function DynamoStudio() {
 
       {/* ── CRUD Modals ── */}
       {modal && (
-        <div style={s.overlay} onClick={() => setModal(null)}>
-          <div style={s.modal} onClick={(e) => e.stopPropagation()}>
+        <div style={styles.overlay} onClick={() => setModal(null)}>
+          <div style={styles.modal} onClick={(clickEvent) => clickEvent.stopPropagation()}>
             {(modal.type === "add" || modal.type === "edit") && (
               <>
-                <div style={s.modalHeader}>
-                  <h2 style={s.modalTitle}>{modal.type === "add" ? "Add New Item" : "Edit Item"}</h2>
-                  <button style={s.modalClose} onClick={() => setModal(null)}>
-                    <Icon d={icons.close} size={16} />
+                <div style={styles.modalHeader}>
+                  <h2 style={styles.modalTitle}>{modal.type === "add" ? "Add New Item" : "Edit Item"}</h2>
+                  <button style={styles.modalClose} onClick={() => setModal(null)}>
+                    <X size={16} />
                   </button>
                 </div>
-                <div style={s.modalBody}>
-                  {columns.map((col) => (
-                    <div key={col} style={s.formRow}>
-                      <label style={s.formLabel}>
-                        {col}
-                        {col === schema.pk && <span style={s.pkBadge}>PK</span>}
-                        {col === schema.sk && <span style={s.skBadge}>SK</span>}
+                <div style={styles.modalBody}>
+                  {columns.map((columnName) => (
+                    <div key={columnName} style={styles.formRow}>
+                      <label style={styles.formLabel}>
+                        {columnName}
+                        {columnName === schema.pk && <span style={styles.pkBadge}>PK</span>}
+                        {columnName === schema.sk && <span style={styles.skBadge}>SK</span>}
                       </label>
                       <input
-                        style={s.formInput}
-                        value={String(formData[col] ?? "")}
-                        onChange={(e) => setFormData((prev) => ({ ...prev, [col]: e.target.value }))}
-                        placeholder={`Enter ${col}...`}
+                        style={styles.formInput}
+                        value={String(formData[columnName] ?? "")}
+                        onChange={(changeEvent) =>
+                          setFormData((previousFormData) => ({ ...previousFormData, [columnName]: changeEvent.target.value }))
+                        }
+                        placeholder={`Enter ${columnName}...`}
                       />
                     </div>
                   ))}
                 </div>
-                <div style={s.modalFooter}>
-                  <button style={s.btnSecondary} onClick={() => setModal(null)} disabled={saving}>
+                <div style={styles.modalFooter}>
+                  <button style={styles.btnSecondary} onClick={() => setModal(null)} disabled={saving}>
                     Cancel
                   </button>
-                  <button style={s.btnPrimary} onClick={handleSave} disabled={saving}>
-                    {saving ? <div style={{ ...s.spinner, width: 12, height: 12, borderWidth: 1.5 }} /> : <Icon d={icons.check} size={14} />}
+                  <button style={styles.btnPrimary} onClick={handleSave} disabled={saving}>
+                    {saving ? <div style={{ ...styles.spinner, width: 12, height: 12, borderWidth: 1.5 }} /> : <Check size={14} />}
                     <span style={{ marginLeft: 6 }}>{saving ? "Saving..." : modal.type === "add" ? "Create Item" : "Save Changes"}</span>
                   </button>
                 </div>
@@ -797,33 +805,33 @@ export default function DynamoStudio() {
             )}
             {modal.type === "delete" && modal.item && (
               <>
-                <div style={s.modalHeader}>
-                  <h2 style={{ ...s.modalTitle, color: "#f87171" }}>Delete Item</h2>
-                  <button style={s.modalClose} onClick={() => setModal(null)}>
-                    <Icon d={icons.close} size={16} />
+                <div style={styles.modalHeader}>
+                  <h2 style={{ ...styles.modalTitle, color: "#f87171" }}>Delete Item</h2>
+                  <button style={styles.modalClose} onClick={() => setModal(null)}>
+                    <X size={16} />
                   </button>
                 </div>
-                <div style={s.modalBody}>
+                <div style={styles.modalBody}>
                   <p style={{ color: "#999", fontSize: 14, marginBottom: 16 }}>
                     This action cannot be undone. The following item will be permanently deleted:
                   </p>
-                  <div style={s.deletePreview}>
+                  <div style={styles.deletePreview}>
                     {Object.entries(modal.item)
                       .slice(0, 5)
-                      .map(([k, v]) => (
-                        <div key={k} style={s.deleteRow}>
-                          <span style={{ color: "#555" }}>{k}</span>
-                          <span style={{ color: "#ccc" }}>{truncateValue(stringifyValue(v), 100)}</span>
+                      .map(([attributeName, attributeValue]) => (
+                        <div key={attributeName} style={styles.deleteRow}>
+                          <span style={{ color: "#555" }}>{attributeName}</span>
+                          <span style={{ color: "#ccc" }}>{truncateValue(stringifyValue(attributeValue), 100)}</span>
                         </div>
                       ))}
                   </div>
                 </div>
-                <div style={s.modalFooter}>
-                  <button style={s.btnSecondary} onClick={() => setModal(null)} disabled={saving}>
+                <div style={styles.modalFooter}>
+                  <button style={styles.btnSecondary} onClick={() => setModal(null)} disabled={saving}>
                     Cancel
                   </button>
-                  <button style={s.btnDanger} onClick={handleDelete} disabled={saving}>
-                    {saving ? <div style={{ ...s.spinner, width: 12, height: 12, borderWidth: 1.5 }} /> : <Icon d={icons.trash} size={14} />}
+                  <button style={styles.btnDanger} onClick={handleDelete} disabled={saving}>
+                    {saving ? <div style={{ ...styles.spinner, width: 12, height: 12, borderWidth: 1.5 }} /> : <Trash2 size={14} />}
                     <span style={{ marginLeft: 6 }}>{saving ? "Deleting..." : "Delete Item"}</span>
                   </button>
                 </div>
@@ -835,19 +843,19 @@ export default function DynamoStudio() {
 
       {/* ── JSON Viewer ── */}
       {jsonViewer && (
-        <div style={s.overlay} onClick={() => setJsonViewer(null)}>
-          <div style={{ ...s.modal, width: 700, maxWidth: "92vw" }} onClick={(e) => e.stopPropagation()}>
-            <div style={s.modalHeader}>
-              <h2 style={s.modalTitle}>JSON Value: {jsonViewer.column}</h2>
-              <button style={s.modalClose} onClick={() => setJsonViewer(null)}>
-                <Icon d={icons.close} size={16} />
+        <div style={styles.overlay} onClick={() => setJsonViewer(null)}>
+          <div style={{ ...styles.modal, width: 700, maxWidth: "92vw" }} onClick={(clickEvent) => clickEvent.stopPropagation()}>
+            <div style={styles.modalHeader}>
+              <h2 style={styles.modalTitle}>JSON Value: {jsonViewer.column}</h2>
+              <button style={styles.modalClose} onClick={() => setJsonViewer(null)}>
+                <X size={16} />
               </button>
             </div>
-            <div style={s.modalBody}>
-              <pre style={s.jsonViewer}>{stringifyValue(jsonViewer.value, true)}</pre>
+            <div style={styles.modalBody}>
+              <pre style={styles.jsonViewer}>{stringifyValue(jsonViewer.value, true)}</pre>
             </div>
-            <div style={s.modalFooter}>
-              <button style={s.btnSecondary} onClick={() => setJsonViewer(null)}>
+            <div style={styles.modalFooter}>
+              <button style={styles.btnSecondary} onClick={() => setJsonViewer(null)}>
                 Close
               </button>
             </div>
@@ -859,7 +867,7 @@ export default function DynamoStudio() {
       {toast && (
         <div
           style={{
-            ...s.toast,
+            ...styles.toast,
             background: toast.type === "error" ? "#2d1515" : "#0f2d1a",
             borderColor: toast.type === "error" ? "#f87171" : "#4ade80",
           }}
@@ -870,7 +878,19 @@ export default function DynamoStudio() {
       )}
 
       {/* ── AI Agent Chat ── */}
-      {agentOpen && <AgentChat key={activeTable || "no-table"} activeTable={activeTable} schema={schema} onClose={() => setAgentOpen(false)} />}
+      {visualizerOpen && <TableVisualizer onClose={() => setVisualizerOpen(false)} onAskAI={askAgentFromVisualizer} />}
+
+      {/* ── AI Agent Chat ── */}
+      {agentOpen && (
+        <AgentChat
+          key={activeTable || "no-table"}
+          activeTable={activeTable}
+          schema={schema}
+          queuedPrompt={queuedAgentPrompt}
+          onQueuedPromptHandled={() => setQueuedAgentPrompt(null)}
+          onClose={() => setAgentOpen(false)}
+        />
+      )}
 
       <style>{`
         * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -888,7 +908,8 @@ export default function DynamoStudio() {
 }
 
 // ─── Styles ────────────────────────────────────────────────────────────────
-const s: Record<string, CSSProperties> = {
+// Inline CSS object for the full page layout, table, controls, and modal surfaces.
+const styles: Record<string, CSSProperties> = {
   root: { display: "flex", height: "100vh", background: "#0a0a0a", fontFamily: "'JetBrains Mono', monospace", color: "#e0e0e0", overflow: "hidden" },
   sidebar: { width: 220, background: "#0d0d0d", borderRight: "1px solid #1a1a1a", display: "flex", flexDirection: "column", flexShrink: 0 },
   logo: { display: "flex", alignItems: "center", gap: 10, padding: "18px 16px 14px", borderBottom: "1px solid #1a1a1a" },

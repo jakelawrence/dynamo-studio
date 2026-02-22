@@ -1,6 +1,25 @@
 "use client";
 import { useState, useEffect, CSSProperties } from "react";
+import {
+  Bot,
+  Check,
+  Database,
+  Key,
+  Pencil,
+  Plus,
+  RefreshCw,
+  Search,
+  Table2,
+  Trash2,
+  X,
+} from "lucide-react";
 import AgentChat from "./AgentChat";
+import TableVisualizer from "./TableVisualizer";
+
+// DynamoStudio reusable component:
+// - Fetches table metadata/items from API routes
+// - Provides item browsing/editing/deleting flows
+// - Orchestrates auxiliary overlays (AI assistant + visualizer)
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 interface TableSchema {
@@ -104,41 +123,6 @@ async function deleteItem(tableName: string, key: DynamoItem): Promise<void> {
   if (!res.ok) throw new Error("Failed to delete item");
 }
 
-// ─── Icon Component ────────────────────────────────────────────────────────
-interface IconProps {
-  d: string;
-  size?: number;
-  className?: string;
-}
-
-const Icon = ({ d, size = 16, className = "" }: IconProps) => (
-  <svg
-    width={size}
-    height={size}
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth="1.8"
-    strokeLinecap="round"
-    strokeLinejoin="round"
-    className={className}
-  >
-    <path d={d} />
-  </svg>
-);
-
-const icons: Record<string, string> = {
-  table: "M3 3h18v18H3zM3 9h18M3 15h18M9 3v18M15 3v18",
-  plus: "M12 5v14M5 12h14",
-  edit: "M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z",
-  trash: "M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6",
-  search: "M21 21l-4.35-4.35M17 11A6 6 0 1 1 5 11a6 6 0 0 1 12 0z",
-  refresh: "M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15",
-  close: "M18 6L6 18M6 6l12 12",
-  check: "M20 6L9 17l-5-5",
-  key: "M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4",
-};
-
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
 // Returns all attribute names found across the current page of items,
@@ -187,6 +171,7 @@ const formatBytes = (bytes: number): string => {
 
 // ─── Main Component ────────────────────────────────────────────────────────
 export default function DynamoStudio() {
+  // Data state for the currently selected table and its rows.
   const [tables, setTables] = useState<string[]>([]);
   const [activeTable, setActiveTable] = useState<string>("");
   const [schema, setSchema] = useState<TableSchema>({ pk: "", sk: null, gsi: [] });
@@ -199,6 +184,7 @@ export default function DynamoStudio() {
   const [activeSearch, setActiveSearch] = useState<string>("");
   const [isSearching, setIsSearching] = useState<boolean>(false);
 
+  // UI interaction state (dialogs, toasts, sorting, selection, overlays).
   const [modal, setModal] = useState<ModalState | null>(null);
   const [jsonViewer, setJsonViewer] = useState<JsonViewerState | null>(null);
   const [formData, setFormData] = useState<DynamoItem>({});
@@ -211,6 +197,8 @@ export default function DynamoStudio() {
   const [sortDir, setSortDir] = useState<SortDir>("asc");
   const [awsRegion, setAwsRegion] = useState<string>("");
   const [agentOpen, setAgentOpen] = useState<boolean>(false);
+  const [visualizerOpen, setVisualizerOpen] = useState<boolean>(false);
+  const [queuedAgentPrompt, setQueuedAgentPrompt] = useState<{ id: string; text: string } | null>(null);
 
   // ── Pagination ────────────────────────────────────────────────────────────
   const PAGE_SIZE_OPTIONS = [10, 25, 50, 100] as const;
@@ -227,6 +215,12 @@ export default function DynamoStudio() {
   const showToast = (msg: string, type: ToastState["type"] = "success"): void => {
     setToast({ msg, type });
     setTimeout(() => setToast(null), 2800);
+  };
+
+  const askAgentFromVisualizer = (prompt: string): void => {
+    setVisualizerOpen(false);
+    setAgentOpen(true);
+    setQueuedAgentPrompt({ id: `visualizer-${Date.now()}`, text: prompt });
   };
 
   // ── On mount: load tables + region ───────────────────────────────────────
@@ -402,6 +396,7 @@ export default function DynamoStudio() {
     }
   };
 
+  // Stable identity per row based on key attributes so selection/edit actions remain deterministic.
   const rowKey = (item: DynamoItem): string => String(item[schema.pk]) + (schema.sk ? `|${item[schema.sk]}` : "");
 
   const openAdd = (): void => {
@@ -492,12 +487,7 @@ export default function DynamoStudio() {
       {/* ── Sidebar ── */}
       <aside style={s.sidebar}>
         <div style={s.logo}>
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#80FF00" strokeWidth="2">
-            <ellipse cx="12" cy="5" rx="9" ry="3" />
-            <path d="M3 5v4c0 1.66 4.03 3 9 3s9-1.34 9-3V5" />
-            <path d="M3 9v4c0 1.66 4.03 3 9 3s9-1.34 9-3V9" />
-            <path d="M3 13v4c0 1.66 4.03 3 9 3s9-1.34 9-3v-4" />
-          </svg>
+          <Database size={22} color="#80FF00" />
           <span style={s.logoText}>DynamoStudio</span>
         </div>
 
@@ -518,7 +508,7 @@ export default function DynamoStudio() {
                 disabled={loading}
                 style={{ ...s.tableBtn, ...(activeTable === t ? s.tableBtnActive : {}) }}
               >
-                <Icon d={icons.table} size={14} />
+                <Table2 size={14} />
                 <span style={{ marginLeft: 8 }}>{t}</span>
               </button>
             ))
@@ -548,7 +538,7 @@ export default function DynamoStudio() {
           <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
             <h1 style={s.tableName}>{activeTable}</h1>
             <div style={s.schemaTag}>
-              <Icon d={icons.key} size={12} />
+              <Key size={12} />
               <span style={{ marginLeft: 4 }}>{schema.pk}</span>
               {schema.sk && (
                 <>
@@ -567,22 +557,23 @@ export default function DynamoStudio() {
           </div>
           <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
             <button style={s.btnSecondary} onClick={() => switchTable(activeTable)} disabled={loading}>
-              <Icon d={icons.refresh} size={14} />
+              <RefreshCw size={14} />
               <span style={{ marginLeft: 6 }}>Refresh</span>
             </button>
             <button style={s.btnPrimary} onClick={openAdd}>
-              <Icon d={icons.plus} size={14} />
+              <Plus size={14} />
               <span style={{ marginLeft: 6 }}>Add Item</span>
+            </button>
+            <button style={s.btnSecondary} onClick={() => setVisualizerOpen(true)} title="Open table visualizer">
+              <Table2 size={14} />
+              <span style={{ marginLeft: 6 }}>Visualizer</span>
             </button>
             <button
               style={{ ...s.btnSecondary, ...(agentOpen ? s.btnAgentActive : {}) }}
               onClick={() => setAgentOpen((v) => !v)}
               title="Open AI Assistant"
             >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
-                <path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20z" />
-                <path d="M12 16v-4M12 8h.01" />
-              </svg>
+              <Bot size={14} />
               <span style={{ marginLeft: 6 }}>Ask AI</span>
             </button>
           </div>
@@ -603,11 +594,11 @@ export default function DynamoStudio() {
             />
             {activeSearch && (
               <button style={s.searchClearBtn} onClick={clearSearch} title="Clear search">
-                <Icon d={icons.close} size={12} />
+                <X size={12} />
               </button>
             )}
             <button style={{ ...s.searchBtn, ...(isSearching ? s.searchBtnActive : {}) }} onClick={commitSearch} disabled={isSearching || loading}>
-              {isSearching ? <div style={{ ...s.spinner, width: 11, height: 11, borderWidth: 1.5 }} /> : <Icon d={icons.search} size={13} />}
+              {isSearching ? <div style={{ ...s.spinner, width: 11, height: 11, borderWidth: 1.5 }} /> : <Search size={13} />}
               <span style={{ marginLeft: 5 }}>{isSearching ? "Searching..." : "Search"}</span>
             </button>
           </div>
@@ -621,7 +612,7 @@ export default function DynamoStudio() {
             </span>
             {selectedRows.size > 0 && (
               <button style={s.btnDanger} onClick={handleBulkDelete}>
-                <Icon d={icons.trash} size={13} />
+                <Trash2 size={13} />
                 <span style={{ marginLeft: 5 }}>Delete {selectedRows.size}</span>
               </button>
             )}
@@ -692,10 +683,10 @@ export default function DynamoStudio() {
                         <td style={{ ...s.td, textAlign: "right" }}>
                           <div style={{ display: "flex", gap: 4, justifyContent: "flex-end" }}>
                             <button style={s.iconBtn} onClick={() => openEdit(item)} title="Edit">
-                              <Icon d={icons.edit} size={13} />
+                              <Pencil size={13} />
                             </button>
                             <button style={{ ...s.iconBtn, ...s.iconBtnDanger }} onClick={() => openDelete(item)} title="Delete">
-                              <Icon d={icons.trash} size={13} />
+                              <Trash2 size={13} />
                             </button>
                           </div>
                         </td>
@@ -764,7 +755,7 @@ export default function DynamoStudio() {
                 <div style={s.modalHeader}>
                   <h2 style={s.modalTitle}>{modal.type === "add" ? "Add New Item" : "Edit Item"}</h2>
                   <button style={s.modalClose} onClick={() => setModal(null)}>
-                    <Icon d={icons.close} size={16} />
+                    <X size={16} />
                   </button>
                 </div>
                 <div style={s.modalBody}>
@@ -789,7 +780,7 @@ export default function DynamoStudio() {
                     Cancel
                   </button>
                   <button style={s.btnPrimary} onClick={handleSave} disabled={saving}>
-                    {saving ? <div style={{ ...s.spinner, width: 12, height: 12, borderWidth: 1.5 }} /> : <Icon d={icons.check} size={14} />}
+                    {saving ? <div style={{ ...s.spinner, width: 12, height: 12, borderWidth: 1.5 }} /> : <Check size={14} />}
                     <span style={{ marginLeft: 6 }}>{saving ? "Saving..." : modal.type === "add" ? "Create Item" : "Save Changes"}</span>
                   </button>
                 </div>
@@ -800,7 +791,7 @@ export default function DynamoStudio() {
                 <div style={s.modalHeader}>
                   <h2 style={{ ...s.modalTitle, color: "#f87171" }}>Delete Item</h2>
                   <button style={s.modalClose} onClick={() => setModal(null)}>
-                    <Icon d={icons.close} size={16} />
+                    <X size={16} />
                   </button>
                 </div>
                 <div style={s.modalBody}>
@@ -823,7 +814,7 @@ export default function DynamoStudio() {
                     Cancel
                   </button>
                   <button style={s.btnDanger} onClick={handleDelete} disabled={saving}>
-                    {saving ? <div style={{ ...s.spinner, width: 12, height: 12, borderWidth: 1.5 }} /> : <Icon d={icons.trash} size={14} />}
+                    {saving ? <div style={{ ...s.spinner, width: 12, height: 12, borderWidth: 1.5 }} /> : <Trash2 size={14} />}
                     <span style={{ marginLeft: 6 }}>{saving ? "Deleting..." : "Delete Item"}</span>
                   </button>
                 </div>
@@ -840,7 +831,7 @@ export default function DynamoStudio() {
             <div style={s.modalHeader}>
               <h2 style={s.modalTitle}>JSON Value: {jsonViewer.column}</h2>
               <button style={s.modalClose} onClick={() => setJsonViewer(null)}>
-                <Icon d={icons.close} size={16} />
+                <X size={16} />
               </button>
             </div>
             <div style={s.modalBody}>
@@ -869,8 +860,20 @@ export default function DynamoStudio() {
         </div>
       )}
 
+      {/* ── Table Visualizer ── */}
+      {visualizerOpen && <TableVisualizer onClose={() => setVisualizerOpen(false)} onAskAI={askAgentFromVisualizer} />}
+
       {/* ── AI Agent Chat ── */}
-      {agentOpen && <AgentChat key={activeTable || "no-table"} activeTable={activeTable} schema={schema} onClose={() => setAgentOpen(false)} />}
+      {agentOpen && (
+        <AgentChat
+          key={activeTable || "no-table"}
+          activeTable={activeTable}
+          schema={schema}
+          queuedPrompt={queuedAgentPrompt}
+          onQueuedPromptHandled={() => setQueuedAgentPrompt(null)}
+          onClose={() => setAgentOpen(false)}
+        />
+      )}
 
       <style>{`
         * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -888,6 +891,7 @@ export default function DynamoStudio() {
 }
 
 // ─── Styles ────────────────────────────────────────────────────────────────
+// Inline CSS object for the full page layout, table, controls, and modal surfaces.
 const s: Record<string, CSSProperties> = {
   root: { display: "flex", height: "100vh", background: "#0a0a0a", fontFamily: "'JetBrains Mono', monospace", color: "#e0e0e0", overflow: "hidden" },
   sidebar: { width: 220, background: "#0d0d0d", borderRight: "1px solid #1a1a1a", display: "flex", flexDirection: "column", flexShrink: 0 },

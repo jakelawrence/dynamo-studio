@@ -145,7 +145,8 @@ export async function POST(req: NextRequest) {
       }
       case "Scan": {
         console.log("🔍 [execute] Executing Scan operation");
-        const scanMode = payload.scanMode ?? "target";
+        const hasExplicitTarget = payload.scanMode === "target" || payload.maxMatchedRows !== undefined || resolvedParams.Limit !== undefined;
+        const scanMode = payload.scanMode ?? (hasExplicitTarget ? "target" : "full");
         const targetMatches = toSafePositiveInt(payload.maxMatchedRows ?? resolvedParams.Limit, 200, 2000);
         const pageSize = toSafePositiveInt(payload.scanPageSize ?? 200, 200, 200);
 
@@ -160,7 +161,12 @@ export async function POST(req: NextRequest) {
         let scannedCount = 0;
         let pageCount = 0;
 
-        console.log("📊 [execute] Scan config:", { scanMode, targetMatches, pageSize });
+        console.log("📊 [execute] Scan config:", {
+          scanMode,
+          targetMatches: scanMode === "target" ? targetMatches : null,
+          pageSize,
+          hasExplicitTarget,
+        });
 
         do {
           const pageResult = await dynamo.send(

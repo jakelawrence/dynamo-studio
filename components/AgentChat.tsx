@@ -2,6 +2,12 @@
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport, UIMessage } from "ai";
 import { useState, useRef, useEffect, useMemo, CSSProperties } from "react";
+import { Bot, Expand, Minimize, SendHorizontal, X } from "lucide-react";
+
+// Agent chat panel:
+// - Streams assistant responses for the current table schema context
+// - Detects executable DynamoDB snippets in assistant output
+// - Lets users parameterize and run those snippets inline
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 interface AgentChatProps {
@@ -11,6 +17,8 @@ interface AgentChatProps {
     sk: string | null;
     gsi: string[];
   } | null;
+  queuedPrompt?: { id: string; text: string } | null;
+  onQueuedPromptHandled?: () => void;
   onClose: () => void;
 }
 
@@ -61,6 +69,7 @@ const STARTERS = [
   { label: "What indexes should I add?", prompt: "Based on common access patterns, what indexes should I consider adding to this table?" },
 ];
 
+// Pull explicit `dynamo-exec` payloads out of fenced blocks in assistant text.
 function parseExecPayloads(content: string): ExecPayload[] {
   const blockRe = /```([\w-]*)\n([\s\S]*?)```/g;
   const payloads: ExecPayload[] = [];
@@ -84,6 +93,7 @@ function parseExecPayloads(content: string): ExecPayload[] {
   return payloads;
 }
 
+// Find the boundaries of the first object literal after a command constructor call.
 function inferObjectLiteralBounds(source: string, startAt: number): { start: number; end: number } | null {
   const start = source.indexOf("{", startAt);
   if (start < 0) return null;
@@ -123,6 +133,7 @@ function inferObjectLiteralBounds(source: string, startAt: number): { start: num
   return null;
 }
 
+// Split top-level object entries while respecting nested objects/arrays/strings.
 function parseSimpleObjectEntries(objectLiteral: string): Array<{ key: string; value: string }> {
   const body = objectLiteral.trim().replace(/^\{/, "").replace(/\}$/, "");
   const entries: Array<{ key: string; value: string }> = [];
@@ -209,6 +220,7 @@ function parseSimpleObjectEntries(objectLiteral: string): Array<{ key: string; v
   return entries;
 }
 
+// Parse `ExpressionAttributeNames` object literals into JSON-safe maps.
 function parseExpressionAttributeNames(value: string): Record<string, string> | null {
   const trimmed = value.trim();
   if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) return null;
@@ -222,6 +234,7 @@ function parseExpressionAttributeNames(value: string): Record<string, string> | 
   return Object.keys(result).length > 0 ? result : null;
 }
 
+// Parse `ExpressionAttributeValues`, converting literals directly and unresolved tokens into runtime inputs.
 function parseExpressionAttributeValues(
   value: string,
 ): { values: Record<string, unknown> | null; inputs: ExecInputSchema[] } {
@@ -259,6 +272,96 @@ function parseExpressionAttributeValues(
   return { values: Object.keys(result).length > 0 ? result : null, inputs };
 }
 
+// Convert a Python token into a value or an input placeholder for runtime prompting.
+function parsePythonLiteralOrInput(token: string, fallbackName: string): { value: unknown; input: ExecInputSchema | null } {
+  const trimmed = token.trim();
+
+  if (/^["'][\s\S]*["']$/.test(trimmed)) {
+    return { value: trimmed.slice(1, -1), input: null };
+  }
+  if (/^-?\d+(\.\d+)?$/.test(trimmed)) {
+    return { value: Number(trimmed), input: null };
+  }
+  if (trimmed === "True" || trimmed === "False") {
+    return { value: trimmed === "True", input: null };
+  }
+
+  const inputName = trimmed.replace(/[^a-zA-Z0-9_]/g, "") || fallbackName;
+  return {
+    value: `{{${inputName}}}`,
+    input: {
+      name: inputName,
+      type: "string",
+      required: true,
+      description: `Value for ${fallbackName}`,
+    },
+  };
+}
+
+// Infer executable payloads from common boto3 patterns in Python code blocks.
+function inferExecPayloadsFromPython(content: string, activeTable: string): ExecPayload[] {
+  const payloads: ExecPayload[] = [];
+  const pythonBlockRe = /```python\n([\s\S]*?)```/g;
+  let blockMatch: RegExpExecArray | null;
+
+  while ((blockMatch = pythonBlockRe.exec(content)) !== null) {
+    const code = blockMatch[1];
+    const tableNameMatch = code.match(/dynamodb\.Table\(\s*["']([^"']+)["']\s*\)/);
+    const tableName = tableNameMatch?.[1] || activeTable;
+    if (!tableName) continue;
+
+    const betweenMatch = code.match(/Attr\(\s*["']([^"']+)["']\s*\)\.between\(\s*([^)]+?)\s*,\s*([^)]+?)\s*\)/);
+    if (betweenMatch) {
+      const [, attrName, startToken, endToken] = betweenMatch;
+      const start = parsePythonLiteralOrInput(startToken, `${attrName}Start`);
+      const end = parsePythonLiteralOrInput(endToken, `${attrName}End`);
+      const inputs: ExecInputSchema[] = [];
+      if (start.input) inputs.push(start.input);
+      if (end.input) inputs.push(end.input);
+
+      payloads.push({
+        type: "dynamo-exec",
+        operation: "Scan",
+        tableName,
+        inputSchema: inputs.length > 0 ? inputs : undefined,
+        params: {
+          TableName: tableName,
+          FilterExpression: "#attr BETWEEN :start AND :end",
+          ExpressionAttributeNames: { "#attr": attrName },
+          ExpressionAttributeValues: {
+            ":start": start.value,
+            ":end": end.value,
+          },
+        },
+      });
+      continue;
+    }
+
+    const containsMatch = code.match(/Attr\(\s*["']([^"']+)["']\s*\)\.contains\(\s*([^)]+?)\s*\)/);
+    if (containsMatch) {
+      const [, attrName, valueToken] = containsMatch;
+      const value = parsePythonLiteralOrInput(valueToken, `${attrName}Value`);
+      payloads.push({
+        type: "dynamo-exec",
+        operation: "Scan",
+        tableName,
+        inputSchema: value.input ? [value.input] : undefined,
+        params: {
+          TableName: tableName,
+          FilterExpression: "contains(#attr, :value)",
+          ExpressionAttributeNames: { "#attr": attrName },
+          ExpressionAttributeValues: {
+            ":value": value.value,
+          },
+        },
+      });
+    }
+  }
+
+  return payloads;
+}
+
+// Infer executable payloads from AWS SDK v3 command usage in JS/TS code blocks.
 function inferExecPayloadsFromCode(content: string, activeTable: string): ExecPayload[] {
   const payloads: ExecPayload[] = [];
   const commandRe = /new\s+(ScanCommand|QueryCommand|GetCommand|PutCommand|UpdateCommand|DeleteCommand)\s*\(/g;
@@ -331,9 +434,12 @@ function inferExecPayloadsFromCode(content: string, activeTable: string): ExecPa
     });
   }
 
-  return payloads;
+  if (payloads.length > 0) return payloads;
+
+  return inferExecPayloadsFromPython(content, activeTable);
 }
 
+// Hide machine-readable exec payload blocks from user-facing assistant message text.
 function stripExecBlocks(content: string): string {
   return content.replace(/```([\w-]*)\n([\s\S]*?)```/g, (full, lang: string, code: string) => {
     const normalized = String(lang).trim().toLowerCase();
@@ -346,6 +452,35 @@ function stripExecBlocks(content: string): string {
       return full;
     }
   });
+}
+
+// Minimal inline markdown renderer for bold/code/newlines used in chat bubbles.
+function renderInlineMarkdown(part: string, partKey: string) {
+  const inline = part.split(/(`[^`]+`|\*\*[^*]+\*\*)/g);
+  return (
+    <span key={partKey}>
+      {inline.map((chunk, j) => {
+        if (chunk.startsWith("**") && chunk.endsWith("**"))
+          return (
+            <strong key={`${partKey}:b:${j}`} style={{ color: "#f0f0f0" }}>
+              {chunk.slice(2, -2)}
+            </strong>
+          );
+        if (chunk.startsWith("`") && chunk.endsWith("`"))
+          return (
+            <code key={`${partKey}:c:${j}`} style={cs.inlineCode}>
+              {chunk.slice(1, -1)}
+            </code>
+          );
+        return chunk.split("\n").map((line, k, arr) => (
+          <span key={`${partKey}:l:${j}:${k}`}>
+            {line}
+            {k < arr.length - 1 && <br />}
+          </span>
+        ));
+      })}
+    </span>
+  );
 }
 
 // ─── Markdown-like renderer ───────────────────────────────────────────────
@@ -370,47 +505,25 @@ function MessageContent({ content }: { content: string }) {
             </div>
           );
         }
-        // Render inline markdown: **bold** and `code`
-        const inline = part.split(/(`[^`]+`|\*\*[^*]+\*\*)/g);
-        return (
-          <span key={i}>
-            {inline.map((chunk, j) => {
-              if (chunk.startsWith("**") && chunk.endsWith("**"))
-                return (
-                  <strong key={j} style={{ color: "#f0f0f0" }}>
-                    {chunk.slice(2, -2)}
-                  </strong>
-                );
-              if (chunk.startsWith("`") && chunk.endsWith("`"))
-                return (
-                  <code key={j} style={cs.inlineCode}>
-                    {chunk.slice(1, -1)}
-                  </code>
-                );
-              // Render newlines as <br>
-              return chunk.split("\n").map((line, k, arr) => (
-                <span key={k}>
-                  {line}
-                  {k < arr.length - 1 && <br />}
-                </span>
-              ));
-            })}
-          </span>
-        );
+        return renderInlineMarkdown(part, `part:${i}`);
       })}
     </div>
   );
 }
 
 // ─── Main Component ────────────────────────────────────────────────────────
-export default function AgentChat({ activeTable, schema, onClose }: AgentChatProps) {
+export default function AgentChat({ activeTable, schema, queuedPrompt, onQueuedPromptHandled, onClose }: AgentChatProps) {
+  // UI state for language preference, panel mode, chat input, and per-card execution state.
   const [selectedLang, setSelectedLang] = useState<Language>("TypeScript");
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [input, setInput] = useState("");
   const [execStates, setExecStates] = useState<Record<string, ExecutionState>>({});
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const queuedHandledRef = useRef<Set<string>>(new Set());
+  const queuedInFlightRef = useRef<string | null>(null);
 
+  // Transport carries table/schema context so responses stay scoped to current data model.
   const transport = useMemo(
     () =>
       new DefaultChatTransport({
@@ -431,6 +544,7 @@ export default function AgentChat({ activeTable, schema, onClose }: AgentChatPro
       .map((part) => part.text)
       .join("\n");
 
+  // Ensure every inferred payload card has deterministic local state.
   const ensureExecState = (key: string): ExecutionState =>
     execStates[key] ?? {
       prompted: false,
@@ -441,6 +555,7 @@ export default function AgentChat({ activeTable, schema, onClose }: AgentChatPro
       inputValues: {},
     };
 
+  // Shared state update helper for payload execution cards.
   const updateExecState = (key: string, updater: (prev: ExecutionState) => ExecutionState) => {
     setExecStates((prev) => {
       const current = prev[key] ?? {
@@ -455,6 +570,7 @@ export default function AgentChat({ activeTable, schema, onClose }: AgentChatPro
     });
   };
 
+  // Capture user-provided values for placeholders inferred from code examples.
   const setExecInputValue = (key: string, inputName: string, value: string) => {
     updateExecState(key, (prev) => ({
       ...prev,
@@ -463,9 +579,11 @@ export default function AgentChat({ activeTable, schema, onClose }: AgentChatPro
     }));
   };
 
+  // Guard execution until every required runtime input is present.
   const hasMissingRequiredInputs = (payload: ExecPayload, state: ExecutionState): boolean =>
     (payload.inputSchema ?? []).some((field) => field.required && !(state.inputValues[field.name] ?? "").toString().trim());
 
+  // Execute assistant-generated DynamoDB operations via backend API and persist result in card state.
   const executePayload = async (stateKey: string, payload: ExecPayload) => {
     const current = ensureExecState(stateKey);
     if (hasMissingRequiredInputs(payload, current)) {
@@ -546,12 +664,14 @@ export default function AgentChat({ activeTable, schema, onClose }: AgentChatPro
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [isFullscreen]);
 
+  // One-click canned prompts shown in the empty chat state.
   const submitStarter = async (prompt: string) => {
     if (!prompt.trim() || isLoading) return;
     await sendMessage({ text: prompt.trim() });
     setInput("");
   };
 
+  // Submits custom input and appends preferred language when the request appears code-oriented.
   const submitWithLang = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isLoading) return;
@@ -564,6 +684,31 @@ export default function AgentChat({ activeTable, schema, onClose }: AgentChatPro
     await sendMessage({ text: finalPrompt });
     setInput("");
   };
+
+  // Auto-submit prompts passed from the visualizer while deduplicating by prompt id.
+  useEffect(() => {
+    if (!queuedPrompt) return;
+    if (queuedHandledRef.current.has(queuedPrompt.id)) return;
+    if (queuedInFlightRef.current === queuedPrompt.id) return;
+    if (isLoading) return;
+
+    let canceled = false;
+    const run = async () => {
+      queuedInFlightRef.current = queuedPrompt.id;
+      try {
+        await sendMessage({ text: queuedPrompt.text });
+        queuedHandledRef.current.add(queuedPrompt.id);
+        if (!canceled) onQueuedPromptHandled?.();
+      } finally {
+        if (queuedInFlightRef.current === queuedPrompt.id) queuedInFlightRef.current = null;
+      }
+    };
+    run().catch(() => {});
+
+    return () => {
+      canceled = true;
+    };
+  }, [queuedPrompt, isLoading, sendMessage, onQueuedPromptHandled]);
 
   return (
     <div style={{ ...cs.panel, ...(isFullscreen ? cs.panelFullscreen : {}) }}>
@@ -590,18 +735,10 @@ export default function AgentChat({ activeTable, schema, onClose }: AgentChatPro
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
           <button style={cs.iconBtn} onClick={() => setIsFullscreen((v) => !v)} title={isFullscreen ? "Exit fullscreen" : "Fullscreen"}>
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              {isFullscreen ? (
-                <path d="M8 3v3a2 2 0 0 1-2 2H3m18 0h-3a2 2 0 0 1-2-2V3m0 18v-3a2 2 0 0 1 2-2h3M3 16h3a2 2 0 0 1 2 2v3" />
-              ) : (
-                <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />
-              )}
-            </svg>
+            {isFullscreen ? <Minimize size={14} /> : <Expand size={14} />}
           </button>
           <button style={cs.iconBtn} onClick={onClose} title="Close">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M18 6L6 18M6 6l12 12" />
-            </svg>
+            <X size={14} />
           </button>
         </div>
       </div>
@@ -611,10 +748,7 @@ export default function AgentChat({ activeTable, schema, onClose }: AgentChatPro
         {messages.length === 0 ? (
           <div style={cs.empty}>
             <div style={cs.emptyIcon}>
-              <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#80FF00" strokeWidth="1.5">
-                <path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20z" />
-                <path d="M12 16v-4M12 8h.01" />
-              </svg>
+              <Bot size={28} color="#80FF00" />
             </div>
             <div style={cs.emptyTitle}>Ask me anything about</div>
             <div style={{ ...cs.emptyTitle, color: "#80FF00" }}>{activeTable || "your DynamoDB tables"}</div>
@@ -627,7 +761,7 @@ export default function AgentChat({ activeTable, schema, onClose }: AgentChatPro
             </div>
           </div>
         ) : (
-          messages.map((msg) => {
+          messages.map((msg, msgIndex) => {
             const rawContent = extractTextContent(msg);
             const structuredExecPayloads = msg.role === "assistant" ? parseExecPayloads(rawContent) : [];
             const execPayloads =
@@ -635,87 +769,124 @@ export default function AgentChat({ activeTable, schema, onClose }: AgentChatPro
                 ? inferExecPayloadsFromCode(rawContent, activeTable)
                 : structuredExecPayloads;
             const displayContent = msg.role === "assistant" ? stripExecBlocks(rawContent) : rawContent;
+            const renderExecCard = (payload: ExecPayload, index: number) => {
+              const stateKey = `${msg.id}:${msgIndex}:${index}`;
+              const state = ensureExecState(stateKey);
+              const requiredMissing = hasMissingRequiredInputs(payload, state);
+              const inputSchema = payload.inputSchema ?? [];
+              const showInputs = inputSchema.length > 0 && (state.prompted || Boolean(state.result));
+
+              return (
+                <div key={stateKey} style={cs.execCard}>
+                  <div style={cs.execMetaRow}>
+                    <span style={cs.execTag}>{payload.operation}</span>
+                    <span style={cs.execTable}>Table: {payload.tableName || activeTable || "current table"}</span>
+                  </div>
+
+                  {showInputs && (
+                    <div style={cs.execInputs}>
+                      {inputSchema.map((field) => (
+                        <label key={field.name} style={cs.execInputLabel}>
+                          <span>
+                            {field.name} ({field.type}){field.required ? " *" : ""}
+                          </span>
+                          <input
+                            style={cs.execInput}
+                            value={state.inputValues[field.name] ?? ""}
+                            onChange={(e) => setExecInputValue(stateKey, field.name, e.target.value)}
+                            placeholder={field.description || `Enter ${field.name}`}
+                          />
+                        </label>
+                      ))}
+                    </div>
+                  )}
+
+                  <div style={cs.execActionRow}>
+                    <button
+                      style={{ ...cs.execBtn, ...(state.isRunning ? cs.execBtnDisabled : {}) }}
+                      onClick={() => {
+                        if (inputSchema.length > 0 && !state.prompted) {
+                          updateExecState(stateKey, (prev) => ({ ...prev, prompted: true, error: null }));
+                          return;
+                        }
+                        executePayload(stateKey, payload);
+                      }}
+                      disabled={state.isRunning}
+                    >
+                      {state.isRunning ? "Running..." : requiredMissing ? "Enter inputs to run" : "Run query"}
+                    </button>
+
+                    {state.result && (
+                      <button style={cs.execToggle} onClick={() => updateExecState(stateKey, (prev) => ({ ...prev, expanded: !prev.expanded }))}>
+                        {state.expanded ? "Hide rows" : `Show rows (${state.result.rowCount})`}
+                      </button>
+                    )}
+                  </div>
+
+                  {state.error && <div style={cs.execError}>{state.error}</div>}
+
+                  {state.result && (
+                    <div style={cs.execSummary}>
+                      Returned {state.result.rowCount} row{state.result.rowCount === 1 ? "" : "s"} from {state.result.tableName}.
+                    </div>
+                  )}
+
+                  {state.result && state.expanded && (
+                    <pre style={cs.execRows}>
+                      <code>{JSON.stringify(state.result.rows, null, 2)}</code>
+                    </pre>
+                  )}
+                </div>
+              );
+            };
 
             return (
-              <div key={msg.id} style={{ ...cs.message, ...(msg.role === "user" ? cs.messageUser : cs.messageAssistant) }}>
+              <div key={`${msg.id}:${msgIndex}`} style={{ ...cs.message, ...(msg.role === "user" ? cs.messageUser : cs.messageAssistant) }}>
                 <div style={{ ...cs.avatar, ...(msg.role === "user" ? cs.avatarUser : cs.avatarAssistant) }}>{msg.role === "user" ? "U" : "AI"}</div>
                 <div style={cs.messageBody}>
                   {msg.role === "assistant" ? (
                     <>
-                      <MessageContent content={displayContent} />
-                      {execPayloads.map((payload, index) => {
-                        const stateKey = `${msg.id}:${index}`;
-                        const state = ensureExecState(stateKey);
-                        const requiredMissing = hasMissingRequiredInputs(payload, state);
-                        const inputSchema = payload.inputSchema ?? [];
-                        const showInputs = inputSchema.length > 0 && (state.prompted || Boolean(state.result));
+                      {(() => {
+                        const contentParts = displayContent.split(/(```[\s\S]*?```)/g);
+                        let codeBlockIndex = 0;
+                        const usedExecIndexes = new Set<number>();
 
                         return (
-                          <div key={stateKey} style={cs.execCard}>
-                            <div style={cs.execMetaRow}>
-                              <span style={cs.execTag}>{payload.operation}</span>
-                              <span style={cs.execTable}>Table: {payload.tableName || activeTable || "current table"}</span>
-                            </div>
+                          <>
+                            {contentParts.map((part, i) => {
+                              if (part.startsWith("```")) {
+                                const lines = part.slice(3, -3).split("\n");
+                                const lang = lines[0].trim();
+                                const code = lines.slice(1).join("\n");
+                                const maybeExec = execPayloads[codeBlockIndex];
+                                const localIndex = codeBlockIndex;
+                                codeBlockIndex += 1;
 
-                            {showInputs && (
-                              <div style={cs.execInputs}>
-                                {inputSchema.map((field) => (
-                                  <label key={field.name} style={cs.execInputLabel}>
-                                    <span>
-                                      {field.name} ({field.type}){field.required ? " *" : ""}
-                                    </span>
-                                    <input
-                                      style={cs.execInput}
-                                      value={state.inputValues[field.name] ?? ""}
-                                      onChange={(e) => setExecInputValue(stateKey, field.name, e.target.value)}
-                                      placeholder={field.description || `Enter ${field.name}`}
-                                    />
-                                  </label>
-                                ))}
-                              </div>
-                            )}
-
-                            <div style={cs.execActionRow}>
-                              <button
-                                style={{ ...cs.execBtn, ...(state.isRunning ? cs.execBtnDisabled : {}) }}
-                                onClick={() => {
-                                  if (inputSchema.length > 0 && !state.prompted) {
-                                    updateExecState(stateKey, (prev) => ({ ...prev, prompted: true, error: null }));
-                                    return;
-                                  }
-                                  executePayload(stateKey, payload);
-                                }}
-                                disabled={state.isRunning}
-                              >
-                                {state.isRunning ? "Running..." : requiredMissing ? "Enter inputs to run" : "Run query"}
-                              </button>
-
-                              {state.result && (
-                                <button
-                                  style={cs.execToggle}
-                                  onClick={() => updateExecState(stateKey, (prev) => ({ ...prev, expanded: !prev.expanded }))}
-                                >
-                                  {state.expanded ? "Hide rows" : `Show rows (${state.result.rowCount})`}
-                                </button>
-                              )}
-                            </div>
-
-                            {state.error && <div style={cs.execError}>{state.error}</div>}
-
-                            {state.result && (
-                              <div style={cs.execSummary}>
-                                Returned {state.result.rowCount} row{state.result.rowCount === 1 ? "" : "s"} from {state.result.tableName}.
-                              </div>
-                            )}
-
-                            {state.result && state.expanded && (
-                              <pre style={cs.execRows}>
-                                <code>{JSON.stringify(state.result.rows, null, 2)}</code>
-                              </pre>
-                            )}
-                          </div>
+                                return (
+                                  <div key={`block:${msg.id}:${i}`}>
+                                    <div style={cs.codeBlock}>
+                                      {lang && <div style={cs.codeLang}>{lang}</div>}
+                                      <pre style={cs.codePre}>
+                                        <code>{code}</code>
+                                      </pre>
+                                    </div>
+                                    {maybeExec && (
+                                      <>
+                                        {(() => {
+                                          usedExecIndexes.add(localIndex);
+                                          return renderExecCard(maybeExec, localIndex);
+                                        })()}
+                                      </>
+                                    )}
+                                  </div>
+                                );
+                              }
+                              return <span key={`text:${msg.id}:${i}`}>{renderInlineMarkdown(part, `inline:${msg.id}:${i}`)}</span>;
+                            })}
+                            {execPayloads.map((payload, index) => (usedExecIndexes.has(index) ? null : renderExecCard(payload, index)))}
+                          </>
                         );
-                      })}
+                      })()}
                     </>
                   ) : (
                     <span style={{ fontSize: 13, lineHeight: 1.65 }}>{displayContent}</span>
@@ -769,9 +940,7 @@ export default function AgentChat({ activeTable, schema, onClose }: AgentChatPro
             {isLoading ? (
               <div style={cs.spinner} />
             ) : (
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M22 2L11 13M22 2L15 22l-4-9-9-4 20-7z" />
-              </svg>
+              <SendHorizontal size={14} />
             )}
           </button>
         </form>
@@ -796,6 +965,7 @@ export default function AgentChat({ activeTable, schema, onClose }: AgentChatPro
 }
 
 // ─── Styles ────────────────────────────────────────────────────────────────
+// Inline style tokens for the floating/fullscreen chat panel and message cards.
 const cs: Record<string, CSSProperties> = {
   panel: {
     position: "fixed",
