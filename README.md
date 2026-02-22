@@ -21,6 +21,8 @@ The AI assistant can return runnable operation payloads (Query/Scan/GetItem/PutI
 - Executes via backend API and shows result rows inline
 - Supports both table-context chat and visualizer-context chat threads
 
+![AI Chat Run Query](docs/screenshots/ai-chat-run-query.png)
+
 ### 2. Table Visualizer
 
 The visualizer provides a schema map workflow for multi-table design analysis.
@@ -30,6 +32,8 @@ The visualizer provides a schema map workflow for multi-table design analysis.
 - Hide/show tables to simplify the graph
 - Ask AI questions from the visualizer snapshot
 - Open a dedicated Visualizer Chat and resume visualizer chat history
+
+![Table Visualizer](docs/screenshots/table-visualizer.png)
 
 ### 3. Local Storage Persistence
 
@@ -49,23 +53,9 @@ DynamoStudio persists user state to improve continuity across reloads/restarts.
   - visualizer chat threads
   - migration support for legacy visualizer history key
 
-## Screenshot Placeholders
+![Main Table Browser](docs/screenshots/main-table-browser.png)
 
-### Main Table Browser
-
-![Main Table Browser Screenshot Placeholder](docs/screenshots/main-table-browser.png)
-
-### AI Chat (Run Query)
-
-![AI Chat Run Query Screenshot Placeholder](docs/screenshots/ai-chat-run-query.png)
-
-### Table Visualizer
-
-![Table Visualizer Screenshot Placeholder](docs/screenshots/table-visualizer.png)
-
-### Visualizer Chat + Thread History
-
-![Visualizer Chat History Screenshot Placeholder](docs/screenshots/visualizer-chat-history.png)
+![Visualizer Chat Thread History](docs/screenshots/visualizer-chat-history.png)
 
 ## Tech Stack
 
