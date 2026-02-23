@@ -201,6 +201,15 @@ const areMessagesEqual = (left: UIMessage[], right: UIMessage[]): boolean => {
   return JSON.stringify(left) === JSON.stringify(right);
 };
 
+const hasTextContent = (message: UIMessage): boolean =>
+  message.parts.some((part) => part.type === "text" && part.text.trim().length > 0);
+
+const shouldPersistThread = (thread: ChatThread): boolean => {
+  const hasUserPrompt = thread.messages.some((message) => message.role === "user" && hasTextContent(message));
+  const hasAssistantResponse = thread.messages.some((message) => message.role === "assistant" && hasTextContent(message));
+  return hasUserPrompt && hasAssistantResponse;
+};
+
 // ─── Quick prompt starters ────────────────────────────────────────────────
 const STARTERS = [
   { label: "Explain this table", prompt: "Explain this table's schema and what access patterns it supports." },
@@ -661,6 +670,7 @@ export default function AgentChat({ activeTable, schema, queuedPrompt, onQueuedP
   const [input, setInput] = useState("");
   const [execStates, setExecStates] = useState<Record<string, ExecutionState>>({});
   const hasInitializedThreadsRef = useRef(false);
+  const isInitializingThreadsRef = useRef(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const queuedHandledRef = useRef<Set<string>>(new Set());
@@ -814,6 +824,8 @@ export default function AgentChat({ activeTable, schema, queuedPrompt, onQueuedP
 
   // On each chat open (component mount), start a new thread and show recents.
   useEffect(() => {
+    isInitializingThreadsRef.current = true;
+    hasInitializedThreadsRef.current = false;
     const storedThreads = readPersistedThreads();
     const storedVisualizerThreads = readPersistedVisualizerThreads();
     const legacyVisualizerThread = readLegacyVisualizerThread();
@@ -826,14 +838,22 @@ export default function AgentChat({ activeTable, schema, queuedPrompt, onQueuedP
     setActiveThreadId(newThread.id);
     setMessages([]);
     setExecStates({});
-    hasInitializedThreadsRef.current = true;
   }, [setMessages, activeTable]);
+
+  // Mark initialization complete only after restored/new threads are committed.
+  useEffect(() => {
+    if (!isInitializingThreadsRef.current) return;
+    if (!activeThreadId) return;
+    hasInitializedThreadsRef.current = true;
+    isInitializingThreadsRef.current = false;
+  }, [threads, activeThreadId]);
 
   // Persist thread list whenever it changes.
   useEffect(() => {
     if (!hasInitializedThreadsRef.current) return;
-    writePersistedThreads(threads);
-    writePersistedVisualizerThreads(threads);
+    const persistedThreads = threads.filter(shouldPersistThread);
+    writePersistedThreads(persistedThreads);
+    writePersistedVisualizerThreads(persistedThreads);
   }, [threads]);
 
   // Keep active thread content in sync with useChat messages.
